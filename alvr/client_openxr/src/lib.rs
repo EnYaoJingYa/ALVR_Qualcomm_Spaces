@@ -164,7 +164,8 @@ pub fn entry_point() {
     const CURRENT_OPENXR_VERSION: xr::Version = xr::Version::new(1, 1, 36);
 
     // Using a provisional platform, before we can get the runtime info
-    let (loader_suffix, openxr_version) = match alvr_system_info::platform(None, None) {
+    let provisional_platform = alvr_system_info::platform(None, None);
+    let (loader_suffix, openxr_version) = match provisional_platform {
         Platform::Quest1 => ("_quest1", LEGACY_OPENXR_VERSION),
         Platform::PicoNeo3
         | Platform::PicoG3
@@ -173,6 +174,7 @@ pub fn entry_point() {
         | Platform::Pico4Enterprise => ("_pico_old", LEGACY_OPENXR_VERSION),
         p if p.is_vive() => ("", LEGACY_OPENXR_VERSION),
         p if p.is_yvr() => ("_yvr", LEGACY_OPENXR_VERSION),
+        Platform::ThinkRealityVRX => ("", LEGACY_OPENXR_VERSION),
         _ => ("", CURRENT_OPENXR_VERSION),
     };
     let xr_entry = unsafe {
@@ -235,6 +237,20 @@ pub fn entry_point() {
     .map(|s| s.as_bytes().to_vec())
     .collect();
 
+    if provisional_platform == Platform::ThinkRealityVRX {
+        // Qualcomm Spaces advertises several optional extensions through API layers but rejects
+        // them during instance creation. Bring up the runtime with the standard OpenGL ES set
+        // first; VRX-specific optional extensions can be enabled individually after validation.
+        let mut vrx_exts = xr::ExtensionSet::default();
+        #[cfg(target_os = "android")]
+        {
+            vrx_exts.khr_android_create_instance = true;
+        }
+        vrx_exts.khr_convert_timespec_time = true;
+        vrx_exts.khr_opengl_es_enable = true;
+        selected_exts = vrx_exts;
+    }
+
     selected_exts = selected_exts.intersection(&available_exts);
 
     let available_layers = xr_entry.enumerate_layers().unwrap();
@@ -276,6 +292,7 @@ pub fn entry_point() {
             .ok()
             .map(|s| s.runtime_version.into_raw()),
     );
+    info!("Detected platform: {platform}");
 
     let graphics_context = Rc::new(GraphicsContext::new_gl());
 
