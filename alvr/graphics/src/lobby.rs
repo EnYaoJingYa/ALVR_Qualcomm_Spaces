@@ -4,6 +4,7 @@ use alvr_common::{
     BodySkeleton, DeviceMotion, ViewParams,
     glam::{IVec2, Mat4, Quat, UVec2, Vec3},
 };
+use alvr_localization::{CJK_FONT, is_chinese};
 use glyph_brush_layout::{
     FontId, GlyphPositioner, HorizontalAlign, Layout, SectionGeometry, SectionText, VerticalAlign,
     ab_glyph::{Font, FontRef, ScaleFont},
@@ -321,14 +322,18 @@ impl LobbyRenderer {
     }
 
     pub fn update_hud_message(&self, message: &str) {
-        let ubuntu_font =
-            FontRef::try_from_slice(include_bytes!("../resources/Ubuntu-Medium.ttf")).unwrap();
+        let font_bytes = if is_chinese() {
+            CJK_FONT
+        } else {
+            include_bytes!("../resources/Ubuntu-Medium.ttf").as_slice()
+        };
+        let font = FontRef::try_from_slice(font_bytes).unwrap();
 
         let section_glyphs = Layout::default()
             .h_align(HorizontalAlign::Center)
             .v_align(VerticalAlign::Center)
             .calculate_glyphs(
-                &[&ubuntu_font],
+                &[&font],
                 &SectionGeometry {
                     screen_position: (
                         HUD_TEXTURE_SIDE as f32 / 2_f32,
@@ -343,7 +348,7 @@ impl LobbyRenderer {
                 }],
             );
 
-        let scaled_font = ubuntu_font.as_scaled(FONT_SIZE);
+        let scaled_font = font.as_scaled(FONT_SIZE);
 
         let mut buffer = vec![0; HUD_TEXTURE_SIDE * HUD_TEXTURE_SIDE * 4];
 

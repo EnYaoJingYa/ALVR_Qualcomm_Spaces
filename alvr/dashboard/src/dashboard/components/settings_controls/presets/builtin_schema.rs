@@ -498,3 +498,61 @@ pub fn eye_face_tracking_schema() -> PresetSchemaNode {
         gui: ChoiceControlType::ButtonGroup,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        codec_preset_schema, encoder_preset_schema, eye_face_tracking_schema,
+        foveation_preset_schema, framerate_schema, game_audio_schema,
+        hand_tracking_interaction_schema, microphone_schema, resolution_schema,
+    };
+    use crate::dashboard::components::presets::schema::PresetSchemaNode;
+    use alvr_localization::has_translation;
+
+    fn check_schema(schema: PresetSchemaNode) {
+        let PresetSchemaNode::HigherOrderChoice(schema) = schema else {
+            return;
+        };
+
+        assert!(
+            has_translation(&schema.name),
+            "missing preset name translation: {}",
+            schema.name
+        );
+
+        for text in schema.strings.values() {
+            assert!(
+                has_translation(text),
+                "missing preset help/notice translation: {text}"
+            );
+        }
+
+        for option in schema.options {
+            assert!(
+                has_translation(&option.display_name),
+                "missing preset option translation: {}",
+                option.display_name
+            );
+            if let Some(content) = option.content {
+                check_schema(content);
+            }
+        }
+    }
+
+    #[test]
+    fn all_builtin_preset_text_is_translated() {
+        for schema in [
+            resolution_schema(),
+            framerate_schema(),
+            codec_preset_schema(),
+            encoder_preset_schema(),
+            foveation_preset_schema(),
+            game_audio_schema(),
+            microphone_schema(),
+            hand_tracking_interaction_schema(),
+            eye_face_tracking_schema(),
+        ] {
+            check_schema(schema);
+        }
+    }
+}

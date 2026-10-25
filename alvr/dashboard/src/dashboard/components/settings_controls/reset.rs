@@ -1,3 +1,4 @@
+use alvr_localization::is_chinese;
 use eframe::{
     egui::{self, Button, Layout, Response, Ui},
     emath::Align,
@@ -12,7 +13,11 @@ pub fn reset_button(ui: &mut Ui, enabled: bool, default_str: &str) -> Response {
             enabled,
             Button::new("⟲").min_size(egui::vec2(height, height)),
         )
-        .on_hover_text(format!("Reset to {default_str}"))
+        .on_hover_text(if is_chinese() {
+            format!("重置为 {default_str}")
+        } else {
+            format!("Reset to {default_str}")
+        })
     })
     .inner
 }

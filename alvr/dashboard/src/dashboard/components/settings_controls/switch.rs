@@ -1,4 +1,5 @@
 use super::{NestingInfo, SettingControl, reset};
+use alvr_localization::tr;
 use alvr_packets::PathValuePair;
 use alvr_session::settings_schema::SchemaNode;
 use eframe::{
@@ -10,7 +11,6 @@ use serde_json as json;
 pub struct Control {
     nesting_info: NestingInfo,
     default_enabled: bool,
-    default_string: String,
     content_control: Box<SettingControl>,
 }
 
@@ -20,12 +20,6 @@ impl Control {
         default_enabled: bool,
         schema_content: SchemaNode,
     ) -> Self {
-        let default_string = if default_enabled {
-            "ON".into()
-        } else {
-            "OFF".into()
-        };
-
         let control = {
             let mut nesting_info = nesting_info.clone();
             nesting_info.path.push("content".into());
@@ -36,7 +30,6 @@ impl Control {
         Self {
             nesting_info,
             default_enabled,
-            default_string,
             content_control: Box::new(control),
         }
     }
@@ -66,12 +59,13 @@ impl Control {
                 request = get_request(&self.nesting_info, *enabled_mut);
             }
 
-            if reset::reset_button(
-                ui,
-                *enabled_mut != self.default_enabled,
-                &self.default_string,
-            )
-            .clicked()
+            let default_string = if self.default_enabled {
+                tr("ON")
+            } else {
+                tr("OFF")
+            };
+            if reset::reset_button(ui, *enabled_mut != self.default_enabled, &default_string)
+                .clicked()
             {
                 request = get_request(&self.nesting_info, self.default_enabled);
             }

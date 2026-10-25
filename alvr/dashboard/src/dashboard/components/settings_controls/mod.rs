@@ -14,6 +14,7 @@ pub mod text;
 pub mod up_down;
 pub mod vector;
 
+use alvr_localization::tr;
 use alvr_packets::{PathSegment, PathValuePair};
 use alvr_session::settings_schema::SchemaNode;
 use eframe::egui::Ui;
@@ -174,7 +175,7 @@ impl SettingControl {
             Self::Dictionary(control) => control.ui(ui, session_fragment, allow_inline),
             Self::None => {
                 grid_flow_inline(ui, allow_inline);
-                ui.add_enabled_ui(false, |ui| ui.label("Unimplemented UI"));
+                ui.add_enabled_ui(false, |ui| ui.label(tr("Unimplemented UI")));
 
                 None
             }

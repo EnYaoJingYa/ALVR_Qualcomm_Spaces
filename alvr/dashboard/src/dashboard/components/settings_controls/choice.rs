@@ -1,5 +1,6 @@
 use super::{NestingInfo, SettingControl, reset};
 use alvr_gui_common::DisplayString;
+use alvr_localization::tr;
 use alvr_packets::PathValuePair;
 use alvr_session::settings_schema::{ChoiceControlType, SchemaEntry, SchemaNode};
 use eframe::{
@@ -31,7 +32,6 @@ fn get_display_name(id: &str, strings: &HashMap<String, String>) -> String {
 pub struct Control {
     nesting_info: NestingInfo,
     default_variant: String,
-    default_string: String,
     variant_labels: Vec<DisplayString>,
     variant_indices: HashMap<String, usize>,
     variant_controls: HashMap<String, SettingControl>,
@@ -53,16 +53,6 @@ impl Control {
                 display: get_display_name(&entry.name, &entry.strings),
             })
             .collect::<Vec<_>>();
-
-        let default_string = format!(
-            "\"{}\"",
-            variant_labels
-                .iter()
-                .find(|d| d.id == default)
-                .cloned()
-                .unwrap()
-                .display
-        );
 
         let variant_indices = schema_variants
             .iter()
@@ -89,7 +79,6 @@ impl Control {
         Self {
             nesting_info,
             default_variant: default,
-            default_string,
             variant_labels,
             variant_indices,
             variant_controls,
@@ -122,7 +111,15 @@ impl Control {
         let mut request = None;
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
             if matches!(&self.gui, ChoiceControlType::ButtonGroup) {
-                if alvr_gui_common::button_group_clicked(ui, &self.variant_labels, variant_mut) {
+                let translated_labels = self
+                    .variant_labels
+                    .iter()
+                    .map(|label| DisplayString {
+                        id: label.id.clone(),
+                        display: tr(&label.display),
+                    })
+                    .collect::<Vec<_>>();
+                if alvr_gui_common::button_group_clicked(ui, &translated_labels, variant_mut) {
                     request = get_request(&self.nesting_info, variant_mut);
                 }
             } else if let Some(mut index) = self.variant_indices.get(variant_mut).cloned() {
@@ -130,7 +127,7 @@ impl Control {
                     ui,
                     &mut index,
                     self.variant_labels.len(),
-                    |idx| self.variant_labels[idx].display.clone(),
+                    |idx| tr(&self.variant_labels[idx].display),
                 );
                 if response.changed() {
                     variant_mut.clone_from(&self.variant_labels[index].id);
@@ -148,9 +145,9 @@ impl Control {
                     self.variant_labels.len() + 1,
                     |idx| {
                         if idx == 0 {
-                            "Preset not applied".into()
+                            tr("Preset not applied")
                         } else {
-                            self.variant_labels[idx - 1].display.clone()
+                            tr(&self.variant_labels[idx - 1].display)
                         }
                     },
                 );
@@ -160,12 +157,17 @@ impl Control {
                 }
             }
 
-            if reset::reset_button(
-                ui,
-                *variant_mut != self.default_variant,
-                &self.default_string,
-            )
-            .clicked()
+            let default_string = format!(
+                "\"{}\"",
+                tr(&self
+                    .variant_labels
+                    .iter()
+                    .find(|label| label.id == self.default_variant)
+                    .expect("default choice variant must exist")
+                    .display)
+            );
+            if reset::reset_button(ui, *variant_mut != self.default_variant, &default_string)
+                .clicked()
             {
                 request = get_request(&self.nesting_info, &self.default_variant);
             }

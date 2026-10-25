@@ -1,6 +1,7 @@
 use alvr_common::LogSeverity;
 use alvr_events::{Event, EventType};
 use alvr_gui_common::theme::log_colors;
+use alvr_localization::tr;
 use alvr_session::{RawEventsConfig, Settings};
 use eframe::{
     egui::{Grid, OpenUrl, OutputCommand, RichText, ScrollArea, Ui},
@@ -74,7 +75,7 @@ impl LogsTab {
 
     pub fn ui(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Copy all").clicked() {
+            if ui.button(tr("Copy all")).clicked() {
                 ui.output_mut(|out| {
                     out.commands
                         .push(OutputCommand::CopyText(self.entries.iter().fold(
@@ -88,14 +89,14 @@ impl LogsTab {
                         )));
                 })
             }
-            if ui.button("Open logs directory").clicked() {
+            if ui.button(tr("Open logs directory")).clicked() {
                 let log_dir = crate::get_filesystem_layout().log_dir;
                 ui.ctx().open_url(OpenUrl::same_tab(format!(
                     "file://{}",
                     log_dir.to_string_lossy()
                 )));
             }
-            if ui.button("Clear all").clicked() {
+            if ui.button(tr("Clear all")).clicked() {
                 self.entries.clear();
             }
         });

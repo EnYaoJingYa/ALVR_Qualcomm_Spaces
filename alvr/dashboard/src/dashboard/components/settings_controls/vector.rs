@@ -3,6 +3,7 @@ use crate::dashboard::components::{
     collapsible,
     up_down::{self, UpDownResult},
 };
+use alvr_localization::tr;
 use alvr_packets::PathValuePair;
 use alvr_session::settings_schema::SchemaNode;
 use eframe::{
@@ -57,7 +58,7 @@ impl Control {
                     &mut request,
                 );
 
-                if reset::reset_button(ui, true, "default list").clicked() {
+                if reset::reset_button(ui, true, &tr("default list")).clicked() {
                     request = get_content_request(&self.nesting_info, self.default.clone())
                 }
 
@@ -126,7 +127,7 @@ impl Control {
             }
 
             ui.label(" ");
-            if ui.button("Add element").clicked() {
+            if ui.button(tr("Add element")).clicked() {
                 let mut session_content =
                     session_fragment["content"].as_array_mut().unwrap().clone();
                 session_content.push(session_fragment["element"].clone());

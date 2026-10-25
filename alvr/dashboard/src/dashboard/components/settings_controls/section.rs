@@ -6,6 +6,7 @@ use alvr_gui_common::{
         log_colors::{INFO_LIGHT, WARNING_LIGHT},
     },
 };
+use alvr_localization::tr;
 use alvr_packets::PathValuePair;
 use alvr_session::settings_schema::{SchemaEntry, SchemaNode};
 use eframe::egui::Ui;
@@ -109,32 +110,31 @@ impl Control {
 
                 ui.horizontal(|ui| {
                     ui.add_space(INDENTATION_STEP * self.nesting_info.indentation_level as f32);
-                    let label_res = ui.label(&entry.id.display);
+                    let label_res = ui.label(tr(&entry.id.display));
                     if cfg!(debug_assertions) {
                         label_res.on_hover_text_at_pointer(&*entry.id);
                     }
 
                     if let Some(string) = &entry.help {
                         ui.colored_label(INFO_LIGHT, "❓")
-                            .on_hover_text_at_pointer(string);
+                            .on_hover_text_at_pointer(tr(string));
                     }
                     if entry.steamvr_restart_flag {
                         ui.colored_label(WARNING_LIGHT, "⚠")
-                            .on_hover_text_at_pointer(
-                                "Changing this setting will make SteamVR restart!\n\
-                                Please save your in-game progress first",
-                            );
+                            .on_hover_text_at_pointer(tr(
+                                "Changing this setting will make SteamVR restart!\nPlease save your in-game progress first",
+                            ));
                     }
                     if entry.real_time_flag {
                         // The emoji is blue but it will be green in the UI
-                        ui.colored_label(OK_GREEN, "🔵").on_hover_text_at_pointer(
+                        ui.colored_label(OK_GREEN, "🔵").on_hover_text_at_pointer(tr(
                             "This setting can be changed in real-time during streaming!",
-                        );
+                        ));
                     }
                 });
 
                 if let Some(string) = &entry.notice {
-                    notice::notice(ui, string);
+                    notice::notice(ui, &tr(string));
 
                     ui.end_row();
 

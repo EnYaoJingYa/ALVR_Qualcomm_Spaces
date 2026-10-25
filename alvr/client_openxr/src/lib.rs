@@ -15,6 +15,7 @@ use alvr_common::{
     parking_lot::RwLock,
 };
 use alvr_graphics::GraphicsContext;
+use alvr_localization::Language;
 use alvr_session::{BodyTrackingBDConfig, BodyTrackingSourcesConfig, PerformanceLevel};
 use alvr_system_info::Platform;
 use extra_extensions::{
@@ -27,6 +28,25 @@ use openxr as xr;
 use passthrough::PassthroughLayer;
 use std::{ffi::CStr, path::Path, rc::Rc, sync::Arc, thread, time::Duration};
 use stream::StreamContext;
+
+const VRX_MAX_REFRESH_RATE_HZ: f32 = 90.0;
+const VRX_RECOMMENDED_EYE_RESOLUTION: u32 = 2160;
+
+fn vrx_extensions() -> xr::ExtensionSet {
+    let mut extensions = xr::ExtensionSet::default();
+    #[cfg(target_os = "android")]
+    {
+        extensions.khr_android_create_instance = true;
+        extensions.khr_android_thread_settings = true;
+    }
+    extensions.ext_performance_settings = true;
+    extensions.fb_display_refresh_rate = true;
+    extensions.khr_convert_timespec_time = true;
+    extensions.khr_opengl_es_enable = true;
+    extensions.qcom_tracking_optimization_settings = true;
+    extensions.other = [b"XR_QCOM_component_versioning\0".to_vec()].into();
+    extensions
+}
 
 fn from_xr_vec3(v: xr::Vector3f) -> Vec3 {
     Vec3::new(v.x, v.y, v.z)
@@ -116,6 +136,84 @@ fn set_performance_level(
                 to_perf_settings_level(level),
             );
         }
+    }
+}
+
+fn set_vrx_performance_level(
+    xr_instance: &xr::Instance,
+    xr_session: &xr::Session<xr::OpenGlEs>,
+    domain: xr::PerfSettingsDomainEXT,
+    level: PerformanceLevel,
+) {
+    let performance_settings = xr_instance
+        .exts()
+        .ext_performance_settings
+        .expect("ThinkReality VRX must support XR_EXT_performance_settings");
+    let result = unsafe {
+        (performance_settings.perf_settings_set_performance_level)(
+            xr_session.as_raw(),
+            domain,
+            to_perf_settings_level(level),
+        )
+    };
+
+    if result != xr::sys::Result::SUCCESS {
+        panic!("Qualcomm performance-level request failed for {domain:?}: {result:?}");
+    }
+}
+
+fn configure_vrx_runtime(xr_instance: &xr::Instance, xr_session: &xr::Session<xr::OpenGlEs>) {
+    set_vrx_performance_level(
+        xr_instance,
+        xr_session,
+        xr::PerfSettingsDomainEXT::CPU,
+        PerformanceLevel::SustainedHigh,
+    );
+    set_vrx_performance_level(
+        xr_instance,
+        xr_session,
+        xr::PerfSettingsDomainEXT::GPU,
+        PerformanceLevel::SustainedHigh,
+    );
+
+    let tracking_settings = xr_instance
+        .exts()
+        .qcom_tracking_optimization_settings
+        .expect("ThinkReality VRX must support XR_QCOM_tracking_optimization_settings");
+    let result = unsafe {
+        (tracking_settings.set_tracking_optimization_settings_hint)(
+            xr_session.as_raw(),
+            xr::sys::TrackingOptimizationSettingsDomainQCOM::ALL,
+            xr::sys::TrackingOptimizationSettingsHintQCOM::HIGH_POWER_PRIORIZATION,
+        )
+    };
+
+    if result != xr::sys::Result::SUCCESS {
+        panic!("Qualcomm tracking optimization request failed: {result:?}");
+    }
+}
+
+fn negotiated_view_resolutions(
+    platform: Platform,
+    recommended: UVec2,
+    max: UVec2,
+) -> (UVec2, UVec2) {
+    if platform == Platform::ThinkRealityVRX
+        && recommended.x > VRX_RECOMMENDED_EYE_RESOLUTION
+        && recommended.y > VRX_RECOMMENDED_EYE_RESOLUTION
+    {
+        // Lenovo's RVRPlayer uses a 2160x2160 eye buffer on the 4560x2280
+        // stereo panel. Keep the runtime maximum and preserve non-square
+        // recommendations, which may depend on the current firmware/runtime.
+        (
+            UVec2::new(
+                recommended.x.min(VRX_RECOMMENDED_EYE_RESOLUTION),
+                recommended.y.min(VRX_RECOMMENDED_EYE_RESOLUTION),
+            ),
+            max,
+        )
+    } else {
+        (recommended, max)
     }
 }
 
@@ -238,23 +336,39 @@ pub fn entry_point() {
     .collect();
 
     if provisional_platform == Platform::ThinkRealityVRX {
-        // Qualcomm Spaces advertises several optional extensions through API layers but rejects
-        // them during instance creation. Bring up the runtime with the standard OpenGL ES set
-        // first; VRX-specific optional extensions can be enabled individually after validation.
-        let mut vrx_exts = xr::ExtensionSet::default();
-        #[cfg(target_os = "android")]
-        {
-            vrx_exts.khr_android_create_instance = true;
-        }
-        vrx_exts.khr_convert_timespec_time = true;
-        vrx_exts.khr_opengl_es_enable = true;
-        selected_exts = vrx_exts;
+        // Qualcomm Spaces advertises extensions from both the runtime and implicit API layers,
+        // but its runtime rejects some of the optional Meta/Pico extensions during instance
+        // creation. Keep this list aligned with extensions that the VRX Unity diagnostics report
+        // as enabled for the same runtime and the graphics/performance extensions used by ALVR.
+        selected_exts = vrx_extensions();
     }
 
-    selected_exts = selected_exts.intersection(&available_exts);
+    if provisional_platform != Platform::ThinkRealityVRX {
+        selected_exts = selected_exts.intersection(&available_exts);
+    }
 
     let available_layers = xr_entry.enumerate_layers().unwrap();
     info!("OpenXR available layers: {available_layers:#?}");
+
+    let app_info = xr::ApplicationInfo {
+        application_name: "ALVR Client",
+        application_version: 0,
+        engine_name: "ALVR",
+        engine_version: 0,
+        api_version: openxr_version,
+    };
+
+    let xr_instance = xr_entry
+        .create_instance(&app_info, &selected_exts, &[])
+        .unwrap_or_else(|e| {
+            if provisional_platform == Platform::ThinkRealityVRX {
+                panic!(
+                    "Failed to create ThinkReality VRX OpenXR instance with required extensions: {e:?}"
+                )
+            } else {
+                panic!("Failed to create OpenXR instance: {e:?}")
+            }
+        });
 
     let other_exts = selected_exts
         .other
@@ -268,20 +382,6 @@ pub fn entry_point() {
         })
         .collect::<Vec<_>>();
 
-    let xr_instance = xr_entry
-        .create_instance(
-            &xr::ApplicationInfo {
-                application_name: "ALVR Client",
-                application_version: 0,
-                engine_name: "ALVR",
-                engine_version: 0,
-                api_version: openxr_version,
-            },
-            &selected_exts,
-            &[],
-        )
-        .unwrap();
-
     let platform = alvr_system_info::platform(
         xr_instance
             .properties()
@@ -293,6 +393,11 @@ pub fn entry_point() {
             .map(|s| s.runtime_version.into_raw()),
     );
     info!("Detected platform: {platform}");
+    alvr_localization::set_language(if platform == Platform::ThinkRealityVRX {
+        Language::Chinese
+    } else {
+        Language::detect()
+    });
 
     let graphics_context = Rc::new(GraphicsContext::new_gl());
 
@@ -311,6 +416,10 @@ pub fn entry_point() {
         let (xr_session, mut xr_frame_waiter, mut xr_frame_stream) =
             create_session(&xr_instance, xr_system, &graphics_context);
 
+        if platform == Platform::ThinkRealityVRX {
+            configure_vrx_runtime(&xr_instance, &xr_session);
+        }
+
         let views_config = xr_instance
             .enumerate_view_configuration_views(
                 xr_system,
@@ -319,21 +428,38 @@ pub fn entry_point() {
             .unwrap();
         assert_eq!(views_config.len(), 2);
 
-        let default_view_resolution = UVec2::new(
+        let runtime_recommended_view_resolution = UVec2::new(
             views_config[0].recommended_image_rect_width,
             views_config[0].recommended_image_rect_height,
         );
 
-        let max_view_resolution = UVec2::new(
+        let runtime_max_view_resolution = UVec2::new(
             views_config[0].max_image_rect_width,
             views_config[0].max_image_rect_height,
         );
+        let (default_view_resolution, max_view_resolution) = negotiated_view_resolutions(
+            platform,
+            runtime_recommended_view_resolution,
+            runtime_max_view_resolution,
+        );
+        info!(
+            "OpenXR view resolution: runtime recommended {runtime_recommended_view_resolution}, runtime max {runtime_max_view_resolution}, negotiated default {default_view_resolution}, negotiated max {max_view_resolution}"
+        );
 
         let refresh_rates = if selected_exts.fb_display_refresh_rate {
-            xr_session.enumerate_display_refresh_rates().unwrap()
+            if platform == Platform::ThinkRealityVRX {
+                xr_session
+                    .enumerate_display_refresh_rates()
+                    .unwrap_or_else(|e| {
+                        panic!("Failed to enumerate ThinkReality VRX display refresh rates: {e:?}")
+                    })
+            } else {
+                xr_session.enumerate_display_refresh_rates().unwrap()
+            }
         } else {
-            vec![90.0]
+            vec![VRX_MAX_REFRESH_RATE_HZ]
         };
+        info!("OpenXR supported display refresh rates: {refresh_rates:?}");
 
         if selected_exts.fb_color_space {
             xr_session
@@ -346,7 +472,13 @@ pub fn entry_point() {
             default_view_resolution,
             max_view_resolution,
             refresh_rates,
-            foveated_encoding: platform != Platform::Unknown,
+            foveated_encoding: if platform == Platform::ThinkRealityVRX {
+                // VRX enumerates eye gaze through an optional API layer, but
+                // the selected stable extension set does not enable it.
+                selected_exts.ext_eye_gaze_interaction
+            } else {
+                platform != Platform::Unknown
+            },
             encoder_high_profile: platform != Platform::Unknown,
             encoder_10_bits: platform != Platform::Unknown,
             encoder_av1: matches!(
@@ -610,6 +742,12 @@ pub fn entry_point() {
 
             xr_frame_stream.begin().unwrap();
 
+            if platform == Platform::ThinkRealityVRX
+                && let Some(stream) = &stream_context
+            {
+                stream.notify_vsync();
+            }
+
             if !frame_state.should_render {
                 xr_frame_stream
                     .end(
@@ -705,4 +843,53 @@ fn android_main(app: android_activity::AndroidApp) {
 
     // Note: the quit event is sent from OpenXR too, this will return rather quicly.
     rendering_thread.join().unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{negotiated_view_resolutions, vrx_extensions};
+    use alvr_common::glam::UVec2;
+    use alvr_system_info::Platform;
+
+    #[test]
+    fn vrx_negotiates_vendor_eye_buffer_resolution() {
+        let (recommended, max) = negotiated_view_resolutions(
+            Platform::ThinkRealityVRX,
+            UVec2::new(2280, 2280),
+            UVec2::new(2280, 2280),
+        );
+        assert_eq!(recommended, UVec2::new(2160, 2160));
+        assert_eq!(max, UVec2::new(2280, 2280));
+    }
+
+    #[test]
+    fn other_platforms_keep_runtime_resolution() {
+        let recommended = UVec2::new(2064, 2208);
+        let max = UVec2::new(2208, 2208);
+        assert_eq!(
+            negotiated_view_resolutions(Platform::Pico4, recommended, max),
+            (recommended, max)
+        );
+    }
+
+    #[test]
+    fn vrx_preserves_non_square_runtime_recommendation() {
+        let recommended = UVec2::new(3040, 1520);
+        let max = UVec2::new(3040, 1520);
+        assert_eq!(
+            negotiated_view_resolutions(Platform::ThinkRealityVRX, recommended, max),
+            (recommended, max)
+        );
+    }
+
+    #[test]
+    fn vrx_stable_fallback_keeps_validated_extensions() {
+        let extensions = vrx_extensions();
+        assert!(extensions.qcom_tracking_optimization_settings);
+        assert!(extensions.ext_performance_settings);
+        assert!(extensions.fb_display_refresh_rate);
+        assert!(extensions.khr_convert_timespec_time);
+        assert!(extensions.khr_opengl_es_enable);
+        assert!(!extensions.other.is_empty());
+    }
 }

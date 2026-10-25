@@ -1,3 +1,4 @@
+use alvr_localization::tr;
 use egui::{Align, Align2, Context, Layout, Ui, Window};
 use std::fmt::{self, Display, Formatter};
 
@@ -12,9 +13,9 @@ pub enum ModalButton {
 impl Display for ModalButton {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            ModalButton::Ok => write!(f, "OK"),
-            ModalButton::Cancel => write!(f, "Cancel"),
-            ModalButton::Close => write!(f, "Close"),
+            ModalButton::Ok => write!(f, "{}", tr("OK")),
+            ModalButton::Cancel => write!(f, "{}", tr("Cancel")),
+            ModalButton::Close => write!(f, "{}", tr("Close")),
             ModalButton::Custom(text) => write!(f, "{text}"),
         }
     }

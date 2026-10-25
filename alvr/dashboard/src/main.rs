@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod dashboard;
+mod localization;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod data_sources;
@@ -29,7 +30,6 @@ fn get_filesystem_layout() -> afs::Layout {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
-    use alvr_common::ALVR_VERSION;
     use alvr_common::info;
     use alvr_filesystem as afs;
     use eframe::{
@@ -75,6 +75,8 @@ fn main() {
 
     let ico = IconDir::read(Cursor::new(include_bytes!("../resources/dashboard.ico"))).unwrap();
     let image = ico.entries().first().unwrap().decode().unwrap();
+    let language = localization::initial_language();
+    alvr_localization::set_language(language);
 
     // Workaround for the steam deck
     if fs::read_to_string("/sys/devices/virtual/dmi/id/board_vendor")
@@ -85,7 +87,7 @@ fn main() {
     }
 
     eframe::run_native(
-        &format!("ALVR Dashboard (streamer v{})", *ALVR_VERSION),
+        &localization::window_title(language),
         NativeOptions {
             viewport: ViewportBuilder::default()
                 .with_app_id("alvr.dashboard")

@@ -1,4 +1,5 @@
 use super::{NestingInfo, reset};
+use alvr_localization::tr;
 use alvr_packets::PathValuePair;
 use eframe::{
     egui::{Layout, Ui},
@@ -9,17 +10,13 @@ use serde_json as json;
 pub struct Control {
     nesting_info: NestingInfo,
     default: bool,
-    default_string: String,
 }
 
 impl Control {
     pub fn new(nesting_info: NestingInfo, default: bool) -> Self {
-        let default_string = if default { "ON".into() } else { "OFF".into() };
-
         Self {
             nesting_info,
             default,
-            default_string,
         }
     }
 
@@ -49,8 +46,8 @@ impl Control {
                 request = get_request(&self.nesting_info, *enabled_mut);
             }
 
-            if reset::reset_button(ui, *enabled_mut != self.default, &self.default_string).clicked()
-            {
+            let default_string = if self.default { tr("ON") } else { tr("OFF") };
+            if reset::reset_button(ui, *enabled_mut != self.default, &default_string).clicked() {
                 request = get_request(&self.nesting_info, self.default);
             }
         });

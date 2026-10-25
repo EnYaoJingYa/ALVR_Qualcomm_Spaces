@@ -59,6 +59,10 @@ fn get_controller_offset(platform: Platform, is_right_hand: bool) -> Pose {
             position: Vec3::new(0.0, 0.0, 0.055),
             orientation: Quat::IDENTITY,
         },
+        // RVRPlayer binds the VRX controllers through the Oculus Touch
+        // interaction profile and reports the grip pose without an extra
+        // app-side offset.
+        Platform::ThinkRealityVRX => Pose::IDENTITY,
         _ => Pose::IDENTITY,
     };
 
@@ -214,6 +218,9 @@ impl InteractionContext {
             Platform::Pico4 | Platform::Pico4Pro | Platform::Pico4Enterprise => {
                 PICO4_CONTROLLER_PROFILE_PATH
             }
+            // Keep this explicit: the VRX runtime exposes its controllers
+            // through the Oculus Touch profile used by Lenovo RVRPlayer.
+            Platform::ThinkRealityVRX => QUEST_CONTROLLER_PROFILE_PATH,
             p if p.is_pico() => PICO4S_CONTROLLER_PROFILE_PATH,
             p if p.is_vive() => FOCUS3_CONTROLLER_PROFILE_PATH,
             p if p.is_yvr() => YVR_CONTROLLER_PROFILE_PATH,

@@ -1,5 +1,6 @@
 use crate::dashboard::ServerRequest;
 use alvr_gui_common::ModalButton;
+use alvr_localization::tr;
 use alvr_packets::PathValuePair;
 use eframe::egui::{self, Context, OpenUrl, Ui};
 use std::{path::PathBuf, process::Command};
@@ -34,12 +35,11 @@ impl NewVersionPopup {
     }
 
     pub fn ui(&self, context: &Context, shutdown_alvr_cb: impl Fn()) -> Option<CloseAction> {
-        let no_remind_button =
-            ModalButton::Custom("Don't remind me again for this version".to_string());
+        let no_remind_button = ModalButton::Custom(tr("Don't remind me again for this version"));
 
         let result = alvr_gui_common::modal(
             context,
-            "New ALVR version available",
+            &tr("New ALVR version available"),
             Some(|ui: &mut Ui| {
                 ui.horizontal(|ui| {
                     ui.add_space(10.0);
@@ -51,15 +51,15 @@ impl NewVersionPopup {
                             ui.spacing_mut().item_spacing.x = 5.0;
                             ui.style_mut().spacing.button_padding = egui::vec2(10.0, 4.0);
 
-                            ui.heading("You can download this version using the launcher:");
+                            ui.heading(tr("You can download this version using the launcher:"));
 
                             if let Some(path) = &self.launcher_path {
-                                if ui.button("Open Launcher").clicked()
+                                if ui.button(tr("Open Launcher")).clicked()
                                     && Command::new(path).spawn().is_ok()
                                 {
                                     shutdown_alvr_cb();
                                 }
-                            } else if ui.button("Download Launcher").clicked() {
+                            } else if ui.button(tr("Download Launcher")).clicked() {
                                 let base_url =
                                     "https://github.com/alvr-org/ALVR/releases/latest/download/";
                                 let file = if cfg!(windows) {
@@ -76,7 +76,7 @@ impl NewVersionPopup {
 
                         ui.label(&self.message);
                         ui.hyperlink_to(
-                            "Releases page",
+                            tr("Releases page"),
                             "https://github.com/alvr-org/ALVR/releases",
                         );
                     });

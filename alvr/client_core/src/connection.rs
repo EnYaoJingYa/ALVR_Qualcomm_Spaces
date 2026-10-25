@@ -13,6 +13,7 @@ use alvr_common::{
     parking_lot::{Condvar, Mutex, RwLock},
     wait_rwlock, warn,
 };
+use alvr_localization::{is_chinese, tr};
 use alvr_packets::{
     AUDIO, ClientConnectionResult, ClientControlPacket, ClientStatistics, ConnectionAcceptedInfo,
     HAPTICS, Haptics, STATISTICS, ServerControlPacket, StreamConfigPacket, TRACKING, TrackingData,
@@ -70,12 +71,22 @@ pub struct ConnectionContext {
 }
 
 fn set_hud_message(event_queue: &Mutex<VecDeque<ClientCoreEvent>>, message: &str) {
-    let message = format!(
-        "ALVR v{}\nhostname: {}\nIP: {}\n\n{message}",
-        *ALVR_VERSION,
-        Config::load().hostname,
-        alvr_system_info::local_ip(),
-    );
+    let message = if is_chinese() {
+        format!(
+            "ALVR v{}\n主机名：{}\nIP：{}\n\n{}",
+            *ALVR_VERSION,
+            Config::load().hostname,
+            alvr_system_info::local_ip(),
+            tr(message),
+        )
+    } else {
+        format!(
+            "ALVR v{}\nhostname: {}\nIP: {}\n\n{message}",
+            *ALVR_VERSION,
+            Config::load().hostname,
+            alvr_system_info::local_ip(),
+        )
+    };
 
     event_queue
         .lock()
@@ -104,7 +115,11 @@ pub fn connection_lifecycle_loop(
                 Arc::clone(&lifecycle_state),
                 Arc::clone(&event_queue),
             ) {
-                let message = format!("Connection error:\n{e}\nCheck the PC for more details");
+                let message = if is_chinese() {
+                    format!("连接错误：\n{e}\n请在 PC 上查看详细信息")
+                } else {
+                    format!("Connection error:\n{e}\nCheck the PC for more details")
+                };
                 set_hud_message(&event_queue, &message);
                 error!("Connection error: {e}");
             }

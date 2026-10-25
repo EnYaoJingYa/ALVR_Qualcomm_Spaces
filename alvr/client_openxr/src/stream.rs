@@ -12,7 +12,8 @@ use alvr_common::{
     anyhow::Result,
     error,
     glam::{UVec2, Vec2},
-    parking_lot::RwLock,
+    info,
+    parking_lot::{Condvar, Mutex, RwLock},
 };
 use alvr_graphics::{GraphicsContext, StreamRenderer, StreamViewParams};
 use alvr_packets::{ClientStreamConfig, RealTimeConfig, TrackingData};
@@ -31,6 +32,45 @@ use std::{
 };
 
 const DECODER_MAX_TIMEOUT_MULTIPLIER: f32 = 0.8;
+fn input_poll_subdivisions(platform: Platform) -> u32 {
+    if platform == Platform::ThinkRealityVRX {
+        // The vendor player sends one VSync-aligned pose update per 90 Hz frame.
+        // Avoid the generic 3x input polling overhead on the XR2.
+        1
+    } else {
+        3
+    }
+}
+
+fn needs_limited_range_fix(platform: Platform, enable_hdr: bool) -> bool {
+    // Qualcomm's GLES MediaCodec path already samples the decoded surface in
+    // the display's expected range. Applying ALVR's full-range compatibility
+    // compression again darkens the image and reduces contrast.
+    !enable_hdr && platform != Platform::ThinkRealityVRX && platform != Platform::SamsungGalaxyXR
+}
+
+#[derive(Default)]
+struct VsyncSignal {
+    sequence: Mutex<u64>,
+    condvar: Condvar,
+}
+
+impl VsyncSignal {
+    fn notify(&self) {
+        *self.sequence.lock() += 1;
+        self.condvar.notify_one();
+    }
+
+    fn wait_for_next(&self, running: &RelaxedAtomic) -> bool {
+        let mut sequence = self.sequence.lock();
+        let observed = *sequence;
+        while *sequence == observed && running.value() {
+            self.condvar.wait(&mut sequence);
+        }
+
+        running.value()
+    }
+}
 
 pub struct ParsedStreamConfig {
     pub view_resolution: UVec2,
@@ -95,6 +135,8 @@ pub struct StreamContext {
     renderer: StreamRenderer,
     decoder: Option<(VideoDecoderConfig, VideoDecoderSource)>,
     use_custom_reprojection: bool,
+    effective_refresh_rate: f32,
+    vsync_signal: Arc<VsyncSignal>,
 }
 
 impl StreamContext {
@@ -111,11 +153,51 @@ impl StreamContext {
 
         let xr_exts = xr_session.instance().exts();
 
-        if xr_exts.fb_display_refresh_rate.is_some() {
+        let effective_refresh_rate = if core_ctx.platform() == Platform::ThinkRealityVRX {
+            assert!(
+                xr_exts.fb_display_refresh_rate.is_some(),
+                "ThinkReality VRX must support XR_FB_display_refresh_rate"
+            );
+            let requested_rate = config.refresh_rate_hint;
+            let supported_rates =
+                xr_session
+                    .enumerate_display_refresh_rates()
+                    .unwrap_or_else(|e| {
+                        panic!("Failed to enumerate ThinkReality VRX display refresh rates: {e:?}")
+                    });
+            if !supported_rates.contains(&requested_rate) {
+                panic!(
+                    "ThinkReality VRX does not support requested refresh rate {requested_rate}Hz; supported: {supported_rates:?}"
+                );
+            }
+
             xr_session
-                .request_display_refresh_rate(config.refresh_rate_hint)
-                .unwrap();
-        }
+                .request_display_refresh_rate(requested_rate)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "Failed to request ThinkReality VRX refresh rate {requested_rate}Hz: {e:?}"
+                    )
+                });
+            let actual_rate = xr_session.get_display_refresh_rate().unwrap_or_else(|e| {
+                panic!("Failed to query ThinkReality VRX display refresh rate: {e:?}")
+            });
+            assert_eq!(
+                actual_rate, requested_rate,
+                "ThinkReality VRX applied an unexpected refresh rate"
+            );
+            actual_rate
+        } else {
+            if xr_exts.fb_display_refresh_rate.is_some() {
+                xr_session
+                    .request_display_refresh_rate(config.refresh_rate_hint)
+                    .unwrap();
+            }
+            config.refresh_rate_hint
+        };
+        info!(
+            "Effective display refresh rate: {effective_refresh_rate} Hz (requested {} Hz)",
+            config.refresh_rate_hint
+        );
 
         let foveation_profile = if let Some(config) = &config.clientside_foveation_config
             && xr_exts.fb_swapchain_update_state.is_some()
@@ -193,7 +275,7 @@ impl StreamContext {
                 || (core_ctx.platform() == Platform::SamsungGalaxyXR))
                 && config.enable_hdr),
             // TODO: Find a driver heuristic for the limited range bug instead?
-            core_ctx.platform() != Platform::SamsungGalaxyXR && !config.enable_hdr,
+            needs_limited_range_fix(core_ctx.platform(), config.enable_hdr),
             config.encoding_gamma,
             config.upscaling.clone(),
         );
@@ -241,6 +323,8 @@ impl StreamContext {
             target_view_resolution,
             renderer,
             decoder: None,
+            effective_refresh_rate,
+            vsync_signal: Arc::new(VsyncSignal::default()),
         };
 
         this.update_reference_space();
@@ -272,6 +356,7 @@ impl StreamContext {
         );
 
         if let Some(running) = self.input_thread.take() {
+            self.vsync_signal.notify();
             running.join().ok();
         }
 
@@ -283,7 +368,10 @@ impl StreamContext {
             let interaction_ctx = Arc::clone(&self.interaction_context);
             let stage_reference_space = Arc::clone(&self.stage_reference_space);
             let view_reference_space = Arc::clone(&self.view_reference_space);
-            let refresh_rate = self.config.refresh_rate_hint;
+            let refresh_rate = self.effective_refresh_rate;
+            let poll_subdivisions = input_poll_subdivisions(self.core_context.platform());
+            let sync_to_vsync = self.core_context.platform() == Platform::ThinkRealityVRX;
+            let vsync_signal = Arc::clone(&self.vsync_signal);
             let running = Arc::clone(&self.input_thread_running);
             move || {
                 stream_input_loop(
@@ -293,10 +381,17 @@ impl StreamContext {
                     &stage_reference_space,
                     &view_reference_space,
                     refresh_rate,
+                    poll_subdivisions,
+                    sync_to_vsync,
+                    &vsync_signal,
                     running,
                 )
             }
         }));
+    }
+
+    pub fn notify_vsync(&self) {
+        self.vsync_signal.notify();
     }
 
     pub fn maybe_initialize_decoder(&mut self, codec: CodecType, config_nal: Vec<u8>) {
@@ -522,6 +617,7 @@ impl StreamContext {
 impl Drop for StreamContext {
     fn drop(&mut self) {
         self.input_thread_running.set(false);
+        self.vsync_signal.notify();
         self.input_thread.take().unwrap().join().ok();
     }
 }
@@ -533,6 +629,9 @@ fn stream_input_loop(
     stage_reference_space: &xr::Space,
     view_reference_space: &xr::Space,
     refresh_rate: f32,
+    poll_subdivisions: u32,
+    sync_to_vsync: bool,
+    vsync_signal: &VsyncSignal,
     running: Arc<RelaxedAtomic>,
 ) {
     let mut last_controller_poses = [Pose::IDENTITY; 2];
@@ -542,6 +641,10 @@ fn stream_input_loop(
     let mut deadline = Instant::now();
     let frame_interval = Duration::from_secs_f32(1.0 / refresh_rate);
     while running.value() {
+        if sync_to_vsync && !vsync_signal.wait_for_next(&running) {
+            break;
+        }
+
         let int_ctx_lock = interaction_ctx.read();
         let int_ctx = &*int_ctx_lock;
         // Streaming related inputs are updated here. Make sure every input poll is done in this
@@ -668,7 +771,53 @@ fn stream_input_loop(
             core_ctx.send_buttons(button_entries);
         }
 
-        deadline += frame_interval / 3;
-        thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        if !sync_to_vsync {
+            deadline += frame_interval / poll_subdivisions;
+            thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RelaxedAtomic, VsyncSignal, input_poll_subdivisions, needs_limited_range_fix};
+    use alvr_system_info::Platform;
+    use std::{sync::Arc, thread, time::Duration};
+
+    #[test]
+    fn vrx_uses_one_input_poll_per_display_frame() {
+        assert_eq!(input_poll_subdivisions(Platform::ThinkRealityVRX), 1);
+        assert_eq!(input_poll_subdivisions(Platform::Pico4), 3);
+    }
+
+    #[test]
+    fn vrx_skips_redundant_limited_range_compression() {
+        assert!(!needs_limited_range_fix(Platform::ThinkRealityVRX, false));
+        assert!(needs_limited_range_fix(Platform::Quest3, false));
+        assert!(!needs_limited_range_fix(Platform::Quest3, true));
+    }
+
+    #[test]
+    fn vsync_signal_wakes_the_input_thread() {
+        let signal = Arc::new(VsyncSignal::default());
+        let running = Arc::new(RelaxedAtomic::new(true));
+        let waiter_signal = Arc::clone(&signal);
+        let waiter_running = Arc::clone(&running);
+        let waiter = thread::spawn(move || waiter_signal.wait_for_next(&waiter_running));
+
+        thread::sleep(Duration::from_millis(10));
+        signal.notify();
+
+        assert!(waiter.join().unwrap());
+    }
+
+    #[test]
+    fn vsync_wait_stops_without_a_later_wake_up() {
+        let signal = VsyncSignal::default();
+        let running = RelaxedAtomic::new(false);
+
+        signal.notify();
+
+        assert!(!signal.wait_for_next(&running));
     }
 }

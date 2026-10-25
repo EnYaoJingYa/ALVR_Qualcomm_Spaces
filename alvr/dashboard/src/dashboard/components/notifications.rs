@@ -1,5 +1,6 @@
 use alvr_common::{LogEntry, LogSeverity};
 use alvr_gui_common::theme::{self, log_colors};
+use alvr_localization::{is_chinese, tr};
 use alvr_session::Settings;
 use eframe::{
     egui::{self, Frame, Label, Layout, Panel, RichText, TextWrapMode, Ui},
@@ -48,18 +49,18 @@ const NOTIFICATION_TIPS: &[&str] = &[
 ];
 
 pub struct NotificationBar {
-    message: String,
+    message: Option<String>,
     current_level: LogSeverity,
     receive_instant: Instant,
     min_notification_level: LogSeverity,
-    tip_message: Option<String>,
+    tip_message: Option<&'static str>,
     expanded: bool,
 }
 
 impl NotificationBar {
     pub fn new() -> Self {
         Self {
-            message: NO_NOTIFICATIONS_MESSAGE.into(),
+            message: None,
             current_level: LogSeverity::Debug,
             receive_instant: Instant::now(),
             min_notification_level: LogSeverity::Debug,
@@ -73,9 +74,7 @@ impl NotificationBar {
 
         if settings.extra.logging.show_notification_tip {
             if self.tip_message.is_none() {
-                self.tip_message = NOTIFICATION_TIPS
-                    .choose(&mut rand::rng())
-                    .map(|s| format!("Tip: {s}"));
+                self.tip_message = NOTIFICATION_TIPS.choose(&mut rand::rng()).copied();
             }
         } else {
             self.tip_message = None;
@@ -97,7 +96,7 @@ impl NotificationBar {
         if event.severity >= min_severity
             && (now > self.receive_instant + TIMEOUT || event.severity >= self.current_level)
         {
-            self.message = event.content;
+            self.message = Some(event.content);
             self.current_level = event.severity;
             self.receive_instant = now;
         }
@@ -106,12 +105,21 @@ impl NotificationBar {
     pub fn ui(&mut self, ui: &mut Ui) {
         let now = Instant::now();
         if now > self.receive_instant + TIMEOUT {
-            self.message = self
-                .tip_message
-                .clone()
-                .unwrap_or_else(|| NO_NOTIFICATIONS_MESSAGE.into());
+            self.message = None;
             self.current_level = LogSeverity::Debug;
         }
+
+        let message = if let Some(message) = &self.message {
+            message.clone()
+        } else if let Some(tip) = self.tip_message {
+            if is_chinese() {
+                format!("提示：{}", tr(tip))
+            } else {
+                format!("Tip: {tip}")
+            }
+        } else {
+            tr(NO_NOTIFICATIONS_MESSAGE)
+        };
 
         let (fg, bg) = match self.current_level {
             LogSeverity::Error => (Color32::BLACK, log_colors::ERROR_LIGHT),
@@ -141,20 +149,33 @@ impl NotificationBar {
         bottom_bar.show(ui, |ui| {
             ui.with_layout(Layout::right_to_left(alignment), |ui| {
                 if !self.expanded {
-                    if ui.small_button("Expand").clicked() {
+                    if ui.small_button(tr("Expand")).clicked() {
                         self.expanded = true;
                     }
-                } else if ui.button("Reduce").clicked() {
+                } else if ui.button(tr("Reduce")).clicked() {
                     self.expanded = false;
                 }
                 ui.with_layout(Layout::left_to_right(alignment), |ui| {
                     //A LayoutJob that has its TextWrapping updated to fill the available space would probably be a more elegant solution.
                     ui.add(
-                        Label::new(RichText::new(&self.message).color(fg).size(12.0))
+                        Label::new(RichText::new(&message).color(fg).size(12.0))
                             .wrap_mode(wrapping),
                     );
                 })
             })
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NOTIFICATION_TIPS;
+    use alvr_localization::has_translation;
+
+    #[test]
+    fn all_notification_tips_are_translated() {
+        for tip in NOTIFICATION_TIPS {
+            assert!(has_translation(tip), "missing translation for tip: {tip}");
+        }
     }
 }

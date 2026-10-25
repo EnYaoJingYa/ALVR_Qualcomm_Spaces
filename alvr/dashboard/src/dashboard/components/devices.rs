@@ -1,6 +1,7 @@
 use crate::dashboard::ServerRequest;
 use alvr_common::ConnectionState;
 use alvr_gui_common::theme::{self, log_colors};
+use alvr_localization::tr;
 use alvr_packets::ClientConnectionsAction;
 use alvr_session::{ClientConnectionConfig, SessionConfig};
 use alvr_sockets::WIRED_CLIENT_HOSTNAME;
@@ -66,8 +67,9 @@ impl DevicesTab {
                             ui.add_space(theme::FRAME_TEXT_SPACING);
                             ui.heading(
                                 RichText::new(
-                                    "ALVR requires running SteamVR! \
-                                    Devices will not be discovered or connected.",
+                                    tr(
+                                        "ALVR requires running SteamVR! Devices will not be discovered or connected.",
+                                    ),
                                 )
                                 .color(Color32::BLACK)
                                 .size(16.0),
@@ -76,7 +78,7 @@ impl DevicesTab {
 
                         #[cfg(not(target_arch = "wasm32"))]
                         ui.with_layout(Layout::right_to_left(eframe::emath::Align::Center), |ui| {
-                            if ui.button("Launch SteamVR").clicked() {
+                            if ui.button(tr("Launch SteamVR")).clicked() {
                                 crate::steamvr_launcher::LAUNCHER.lock().launch_steamvr();
                             }
                         });
@@ -123,7 +125,7 @@ impl DevicesTab {
         });
 
         if let Some(mut state) = self.edit_popup_state.take() {
-            Window::new("Edit connection")
+            Window::new(tr("Edit connection"))
                 .anchor(Align2::CENTER_CENTER, (0.0, 0.0))
                 .resizable(false)
                 .collapsible(false)
@@ -133,7 +135,7 @@ impl DevicesTab {
                     ui.columns(2, |ui| {
                         ui[0].horizontal(|ui| {
                             ui.add_space(5.0);
-                            ui.label("Hostname:");
+                            ui.label(tr("Hostname:"));
                         });
                         ui[1].add_enabled(
                             state.new_devices,
@@ -142,22 +144,22 @@ impl DevicesTab {
 
                         ui[0].horizontal(|ui| {
                             ui.add_space(5.0);
-                            ui.label("IP Addresses:");
+                            ui.label(tr("IP Addresses:"));
                         });
                         for address in &mut state.ips {
                             ui[1].text_edit_singleline(address);
                         }
-                        if ui[1].button("Add new").clicked() {
+                        if ui[1].button(tr("Add new")).clicked() {
                             state.ips.push("192.168.X.X".into());
                         }
                     });
 
                     ui.columns(2, |ui| {
-                        if ui[0].button("Cancel").clicked() {
+                        if ui[0].button(tr("Cancel")).clicked() {
                             return;
                         }
 
-                        if ui[1].button("Save").clicked() {
+                        if ui[1].button(tr("Save")).clicked() {
                             let manual_ips =
                                 state.ips.iter().filter_map(|s| s.parse().ok()).collect();
 
@@ -205,7 +207,7 @@ fn wired_client_section(
                     .num_columns(2)
                     .spacing(egui::vec2(8.0, 8.0))
                     .show(ui, |ui| {
-                        ui.heading("Wired Connection");
+                        ui.heading(tr("Wired Connection"));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let mut wired = maybe_client.is_some();
 
@@ -233,7 +235,7 @@ fn wired_client_section(
 
                         if let Some(progress) = adb_download_progress.filter(|p| *p < 1.0) {
                             ui.horizontal(|ui| {
-                                ui.label("ADB download progress");
+                                ui.label(tr("ADB download progress"));
                             });
                             ui.horizontal(|ui| {
                                 ui.add(ProgressBar::new(progress).animate(true).show_percentage());
@@ -268,7 +270,7 @@ fn new_clients_section(
             ui.vertical_centered_justified(|ui| {
                 ui.horizontal(|ui| {
                     ui.add_space(theme::FRAME_TEXT_SPACING);
-                    ui.heading("New Wireless Devices");
+                    ui.heading(tr("New Wireless Devices"));
 
                     // Extend to the right
                     ui.with_layout(Layout::right_to_left(Align::Center), |_| ());
@@ -287,7 +289,7 @@ fn new_clients_section(
                                     ui.label(hostname);
                                 });
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui.button("Trust").clicked() {
+                                    if ui.button(tr("Trust")).clicked() {
                                         request = Some(ServerRequest::UpdateClientList {
                                             hostname: hostname.clone(),
                                             action: ClientConnectionsAction::Trust,
@@ -317,11 +319,11 @@ fn trusted_clients_section(
             Grid::new(0).num_columns(2).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_space(theme::FRAME_TEXT_SPACING);
-                    ui.heading("Trusted Wireless Devices");
+                    ui.heading(tr("Trusted Wireless Devices"));
                 });
 
                 ui.with_layout(Layout::right_to_left(eframe::emath::Align::Center), |ui| {
-                    if ui.button("Add device manually").clicked() {
+                    if ui.button(tr("Add device manually")).clicked() {
                         *edit_popup_state = Some(EditPopupState {
                             hostname: "XXXX.client.local.".into(),
                             new_devices: true,
@@ -352,16 +354,16 @@ fn trusted_clients_section(
                                 ui.label(format!(
                                     "{hostname}: {}",
                                     data.current_ip
-                                        .map_or_else(|| "Unknown IP".into(), |ip| ip.to_string()),
+                                        .map_or_else(|| tr("Unknown IP"), |ip| ip.to_string()),
                                 ));
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui.button("Remove").clicked() {
+                                    if ui.button(tr("Remove")).clicked() {
                                         request = Some(ServerRequest::UpdateClientList {
                                             hostname: hostname.clone(),
                                             action: ClientConnectionsAction::RemoveEntry,
                                         });
                                     }
-                                    if ui.button("Edit").clicked() {
+                                    if ui.button(tr("Edit")).clicked() {
                                         *edit_popup_state = Some(EditPopupState {
                                             new_devices: false,
                                             hostname: hostname.to_owned(),
@@ -383,12 +385,14 @@ fn trusted_clients_section(
 
 fn connection_label(ui: &mut Ui, connection_state: &ConnectionState) {
     match connection_state {
-        ConnectionState::Disconnected => ui.colored_label(Color32::GRAY, "Disconnected"),
-        ConnectionState::Connecting => ui.colored_label(log_colors::WARNING_LIGHT, "Connecting"),
-        ConnectionState::Connected => ui.colored_label(theme::OK_GREEN, "Connected"),
-        ConnectionState::Streaming => ui.colored_label(theme::OK_GREEN, "Streaming"),
+        ConnectionState::Disconnected => ui.colored_label(Color32::GRAY, tr("Disconnected")),
+        ConnectionState::Connecting => {
+            ui.colored_label(log_colors::WARNING_LIGHT, tr("Connecting"))
+        }
+        ConnectionState::Connected => ui.colored_label(theme::OK_GREEN, tr("Connected")),
+        ConnectionState::Streaming => ui.colored_label(theme::OK_GREEN, tr("Streaming")),
         ConnectionState::Disconnecting => {
-            ui.colored_label(log_colors::WARNING_LIGHT, "Disconnecting")
+            ui.colored_label(log_colors::WARNING_LIGHT, tr("Disconnecting"))
         }
     };
 }

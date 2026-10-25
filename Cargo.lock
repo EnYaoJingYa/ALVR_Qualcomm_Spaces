@@ -223,6 +223,7 @@ dependencies = [
  "alvr_audio",
  "alvr_common",
  "alvr_graphics",
+ "alvr_localization",
  "alvr_packets",
  "alvr_session",
  "alvr_sockets",
@@ -259,6 +260,7 @@ dependencies = [
  "alvr_client_core",
  "alvr_common",
  "alvr_graphics",
+ "alvr_localization",
  "alvr_packets",
  "alvr_session",
  "alvr_system_info",
@@ -294,6 +296,7 @@ dependencies = [
  "alvr_events",
  "alvr_filesystem",
  "alvr_gui_common",
+ "alvr_localization",
  "alvr_packets",
  "alvr_server_io",
  "alvr_session",
@@ -339,6 +342,7 @@ name = "alvr_graphics"
 version = "21.0.0-dev14"
 dependencies = [
  "alvr_common",
+ "alvr_localization",
  "alvr_session",
  "glow 0.16.0",
  "glyph_brush_layout",
@@ -352,6 +356,7 @@ name = "alvr_gui_common"
 version = "21.0.0-dev14"
 dependencies = [
  "alvr_common",
+ "alvr_localization",
  "egui",
 ]
 
@@ -377,6 +382,10 @@ dependencies = [
  "winres",
  "zip",
 ]
+
+[[package]]
+name = "alvr_localization"
+version = "21.0.0-dev14"
 
 [[package]]
 name = "alvr_packets"

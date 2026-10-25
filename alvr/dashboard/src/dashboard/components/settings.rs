@@ -4,6 +4,7 @@ use super::{
 };
 use crate::dashboard::ServerRequest;
 use alvr_gui_common::{DisplayString, theme};
+use alvr_localization::tr;
 use alvr_session::{SessionSettings, Settings};
 use eframe::egui::{Align, Frame, Grid, Layout, RichText, ScrollArea, Ui};
 #[cfg(target_arch = "wasm32")]
@@ -131,13 +132,13 @@ impl SettingsTab {
                         ui.selectable_value(
                             &mut self.selected_top_tab_id,
                             "presets".into(),
-                            RichText::new("Presets").raised().size(15.0),
+                            RichText::new(tr("Presets")).raised().size(15.0),
                         );
                         for entry in &mut self.top_level_entries {
                             ui.selectable_value(
                                 &mut self.selected_top_tab_id,
                                 entry.id.id.clone(),
-                                RichText::new(entry.id.display.clone()).raised().size(15.0),
+                                RichText::new(tr(&entry.id.display)).raised().size(15.0),
                             );
                         }
                     })
@@ -223,5 +224,102 @@ impl SettingsTab {
         }
 
         requests
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alvr_localization::has_translation;
+    use alvr_session::{Settings, session_settings_default};
+    use settings_schema::{SchemaEntry, SchemaNode};
+    use std::collections::{BTreeSet, HashMap};
+
+    fn section_display_name(id: &str, strings: &HashMap<String, String>) -> String {
+        super::super::settings_controls::get_display_name(id, strings)
+    }
+
+    fn choice_display_name(id: &str, strings: &HashMap<String, String>) -> String {
+        strings.get("display_name").cloned().unwrap_or_else(|| {
+            let mut chars = id.chars();
+            let mut result = vec![chars.next().unwrap()];
+
+            for c in chars {
+                let lower = c.to_ascii_lowercase();
+                if lower != c {
+                    result.push(' ');
+                }
+                result.push(lower);
+            }
+
+            result.into_iter().collect()
+        })
+    }
+
+    fn check_entry_strings(
+        entry: &SchemaEntry<impl Sized>,
+        display_name: impl Fn(&str, &HashMap<String, String>) -> String,
+        missing: &mut BTreeSet<String>,
+    ) {
+        let label = display_name(&entry.name, &entry.strings);
+        if !has_translation(&label) {
+            missing.insert(format!("label: {label}"));
+        }
+
+        for key in ["display_name", "help", "notice"] {
+            if let Some(text) = entry.strings.get(key) {
+                if !has_translation(text) {
+                    missing.insert(format!("{}: {text}", entry.name));
+                }
+            }
+        }
+    }
+
+    fn check_node(node: &SchemaNode, missing: &mut BTreeSet<String>) {
+        match node {
+            SchemaNode::Section { entries, .. } => {
+                for entry in entries {
+                    if !entry.flags.contains("hidden") {
+                        check_entry_strings(entry, section_display_name, missing);
+                    }
+                    // Extra OpenVR property contents are third-party SteamVR
+                    // identifiers rather than ALVR UI labels.
+                    if !entry.flags.contains("hidden") && entry.name != "extra_openvr_props" {
+                        check_node(&entry.content, missing);
+                    }
+                }
+            }
+            SchemaNode::Choice { variants, .. } => {
+                for variant in variants {
+                    check_entry_strings(variant, choice_display_name, missing);
+                    if let Some(content) = &variant.content {
+                        check_node(content, missing);
+                    }
+                }
+            }
+            SchemaNode::Optional { content, .. } | SchemaNode::Switch { content, .. } => {
+                check_node(content, missing);
+            }
+            SchemaNode::Array(elements) => {
+                for element in elements {
+                    check_node(element, missing);
+                }
+            }
+            SchemaNode::Vector {
+                default_element, ..
+            } => check_node(default_element, missing),
+            SchemaNode::Dictionary { default_value, .. } => check_node(default_value, missing),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn all_runtime_setting_messages_are_translated() {
+        let mut missing = BTreeSet::new();
+        check_node(&Settings::schema(session_settings_default()), &mut missing);
+        assert!(
+            missing.is_empty(),
+            "missing translations:\n{}",
+            missing.into_iter().collect::<Vec<_>>().join("\n")
+        );
     }
 }
