@@ -1,12 +1,57 @@
 use crate::{BuildPlatform, command};
 use alvr_filesystem as afs;
-use std::{fs, path::Path};
+use sha2::{Digest, Sha256};
+use std::{fs, io::Read, path::Path};
 use xshell::{Shell, cmd};
 
 pub enum OpenXRLoadersSelection {
     OnlyGeneric,
     OnlyPico,
     All,
+}
+
+// Official VRMR Snapdragon Spaces SDK 0.23.0, UE5.3 plugin's ThirdParty AAR.
+// Pin the release input and its stripped JNI artifact, not the prefab debug library.
+const SPACES_AAR_SHA256: &str = "be239f71f8abdc88730218f2a23988db5e47355aabe85fa65699888f4a2c4132";
+const SPACES_LOADER_SHA256: &str =
+    "934722b432bd85c07c1cf07fba0cd3c0e597baf58f7fe7b64cf669bfd401f401";
+
+pub fn prepare_spaces_loader(aar: &Path) {
+    let bytes = fs::read(aar).expect("Read the official Spaces 0.23.0 libopenxr_loader.aar");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        SPACES_AAR_SHA256,
+        "Unexpected Spaces AAR: use the official VRMR SDK 0.23.0 UE5.3 plugin"
+    );
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut loader = Vec::new();
+    archive
+        .by_name("jni/arm64-v8a/libopenxr_loader.so")
+        .unwrap()
+        .read_to_end(&mut loader)
+        .unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&loader)),
+        SPACES_LOADER_SHA256
+    );
+    let destination = afs::deps_dir().join("android_openxr/arm64-v8a");
+    fs::create_dir_all(&destination).unwrap();
+    fs::write(destination.join("libopenxr_loader_spaces.so"), loader).unwrap();
+    println!(
+        "Prepared Spaces SDK 0.23.0 ARM64 JNI loader from {} ({SPACES_LOADER_SHA256})",
+        aar.display()
+    );
+}
+
+pub fn validate_spaces_loader() {
+    let loader = afs::deps_dir().join("android_openxr/arm64-v8a/libopenxr_loader_spaces.so");
+    let bytes = fs::read(loader).expect(
+        "Spaces loader missing: run cargo xtask prepare-spaces --spaces-loader-aar <official 0.23.0 AAR>");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(bytes)),
+        SPACES_LOADER_SHA256,
+        "Spaces loader changed; prepare the official SDK dependency again"
+    );
 }
 
 pub fn choco_install(sh: &Shell, packages: &[&str]) -> Result<(), xshell::Error> {

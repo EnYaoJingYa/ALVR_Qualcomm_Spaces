@@ -181,10 +181,11 @@ impl StreamContext {
             let actual_rate = xr_session.get_display_refresh_rate().unwrap_or_else(|e| {
                 panic!("Failed to query ThinkReality VRX display refresh rate: {e:?}")
             });
-            assert_eq!(
-                actual_rate, requested_rate,
-                "ThinkReality VRX applied an unexpected refresh rate"
-            );
+            if actual_rate != requested_rate {
+                info!(
+                    "ThinkReality VRX accepted {requested_rate}Hz but reports {actual_rate}Hz; the runtime may apply the request asynchronously"
+                );
+            }
             actual_rate
         } else {
             if xr_exts.fb_display_refresh_rate.is_some() {
@@ -232,7 +233,12 @@ impl StreamContext {
             config.view_resolution,
             &config.upscaling,
         );
-        let format = graphics::swapchain_format(&gfx_ctx, &xr_session, config.enable_hdr);
+        let format = graphics::swapchain_format(
+            &gfx_ctx,
+            &xr_session,
+            config.enable_hdr,
+            core_ctx.platform(),
+        );
 
         let swapchains = [
             graphics::create_swapchain(

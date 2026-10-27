@@ -192,6 +192,36 @@ pub fn start_application(adb_path: &str, device_serial: &str, application_id: &s
     Ok(())
 }
 
+// Verify the exit status for VRX before consuming its one auto-launch attempt.
+// Keep other devices' existing launch behavior unchanged.
+pub fn start_vrx_application(
+    adb_path: &str,
+    device_serial: &str,
+    application_id: &str,
+) -> Result<()> {
+    let output = get_command(
+        adb_path,
+        &[
+            "-s",
+            device_serial,
+            "shell",
+            "monkey",
+            "-p",
+            application_id,
+            "1",
+        ],
+    )
+    .output()
+    .context(format!("Failed to start {application_id}"))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "VRX application launch failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
 //////////
 // Devices
 

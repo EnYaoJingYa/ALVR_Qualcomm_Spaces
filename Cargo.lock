@@ -511,8 +511,10 @@ dependencies = [
  "pkg-config",
  "serde",
  "serde_json",
+ "sha2",
  "walkdir",
  "xshell",
+ "zip",
 ]
 
 [[package]]

@@ -5,11 +5,12 @@ mod interaction;
 mod lobby;
 mod passthrough;
 mod stream;
+mod vrx;
 
 use crate::stream::ParsedStreamConfig;
 use alvr_client_core::{ClientCapabilities, ClientCoreContext, ClientCoreEvent};
 use alvr_common::{
-    Fov, HAND_LEFT_ID, Pose, debug, error,
+    Fov, HAND_LEFT_ID, Pose, RelaxedAtomic, debug, error,
     glam::{Quat, UVec2, Vec3},
     info,
     parking_lot::RwLock,
@@ -30,7 +31,6 @@ use std::{ffi::CStr, path::Path, rc::Rc, sync::Arc, thread, time::Duration};
 use stream::StreamContext;
 
 const VRX_MAX_REFRESH_RATE_HZ: f32 = 90.0;
-const VRX_RECOMMENDED_EYE_RESOLUTION: u32 = 2160;
 
 fn vrx_extensions() -> xr::ExtensionSet {
     let mut extensions = xr::ExtensionSet::default();
@@ -43,7 +43,6 @@ fn vrx_extensions() -> xr::ExtensionSet {
     extensions.fb_display_refresh_rate = true;
     extensions.khr_convert_timespec_time = true;
     extensions.khr_opengl_es_enable = true;
-    extensions.qcom_tracking_optimization_settings = true;
     extensions.other = [b"XR_QCOM_component_versioning\0".to_vec()].into();
     extensions
 }
@@ -127,7 +126,12 @@ fn set_performance_level(
     xr_session: &xr::Session<xr::OpenGlEs>,
     domain: xr::PerfSettingsDomainEXT,
     level: PerformanceLevel,
+    platform: Platform,
 ) {
+    if platform == Platform::ThinkRealityVRX {
+        set_vrx_performance_level(xr_instance, xr_session, domain, level);
+        return;
+    }
     if let Some(performance_settings) = xr_instance.exts().ext_performance_settings {
         unsafe {
             (performance_settings.perf_settings_set_performance_level)(
@@ -175,46 +179,6 @@ fn configure_vrx_runtime(xr_instance: &xr::Instance, xr_session: &xr::Session<xr
         xr::PerfSettingsDomainEXT::GPU,
         PerformanceLevel::SustainedHigh,
     );
-
-    let tracking_settings = xr_instance
-        .exts()
-        .qcom_tracking_optimization_settings
-        .expect("ThinkReality VRX must support XR_QCOM_tracking_optimization_settings");
-    let result = unsafe {
-        (tracking_settings.set_tracking_optimization_settings_hint)(
-            xr_session.as_raw(),
-            xr::sys::TrackingOptimizationSettingsDomainQCOM::ALL,
-            xr::sys::TrackingOptimizationSettingsHintQCOM::HIGH_POWER_PRIORIZATION,
-        )
-    };
-
-    if result != xr::sys::Result::SUCCESS {
-        panic!("Qualcomm tracking optimization request failed: {result:?}");
-    }
-}
-
-fn negotiated_view_resolutions(
-    platform: Platform,
-    recommended: UVec2,
-    max: UVec2,
-) -> (UVec2, UVec2) {
-    if platform == Platform::ThinkRealityVRX
-        && recommended.x > VRX_RECOMMENDED_EYE_RESOLUTION
-        && recommended.y > VRX_RECOMMENDED_EYE_RESOLUTION
-    {
-        // Lenovo's RVRPlayer uses a 2160x2160 eye buffer on the 4560x2280
-        // stereo panel. Keep the runtime maximum and preserve non-square
-        // recommendations, which may depend on the current firmware/runtime.
-        (
-            UVec2::new(
-                recommended.x.min(VRX_RECOMMENDED_EYE_RESOLUTION),
-                recommended.y.min(VRX_RECOMMENDED_EYE_RESOLUTION),
-            ),
-            max,
-        )
-    } else {
-        (recommended, max)
-    }
 }
 
 fn default_view() -> xr::View {
@@ -256,6 +220,10 @@ fn create_session(
 }
 
 pub fn entry_point() {
+    run(&RelaxedAtomic::new(false));
+}
+
+fn run(shutdown: &RelaxedAtomic) -> Platform {
     alvr_client_core::init_logging();
 
     const LEGACY_OPENXR_VERSION: xr::Version = xr::Version::new(1, 0, 34);
@@ -272,7 +240,7 @@ pub fn entry_point() {
         | Platform::Pico4Enterprise => ("_pico_old", LEGACY_OPENXR_VERSION),
         p if p.is_vive() => ("", LEGACY_OPENXR_VERSION),
         p if p.is_yvr() => ("_yvr", LEGACY_OPENXR_VERSION),
-        Platform::ThinkRealityVRX => ("", LEGACY_OPENXR_VERSION),
+        Platform::ThinkRealityVRX => ("_spaces", LEGACY_OPENXR_VERSION),
         _ => ("", CURRENT_OPENXR_VERSION),
     };
     let xr_entry = unsafe {
@@ -437,13 +405,10 @@ pub fn entry_point() {
             views_config[0].max_image_rect_width,
             views_config[0].max_image_rect_height,
         );
-        let (default_view_resolution, max_view_resolution) = negotiated_view_resolutions(
-            platform,
-            runtime_recommended_view_resolution,
-            runtime_max_view_resolution,
-        );
+        let default_view_resolution = runtime_recommended_view_resolution;
+        let max_view_resolution = runtime_max_view_resolution;
         info!(
-            "OpenXR view resolution: runtime recommended {runtime_recommended_view_resolution}, runtime max {runtime_max_view_resolution}, negotiated default {default_view_resolution}, negotiated max {max_view_resolution}"
+            "OpenXR view resolution: recommended {default_view_resolution}, max {max_view_resolution}"
         );
 
         let refresh_rates = if selected_exts.fb_display_refresh_rate {
@@ -472,13 +437,9 @@ pub fn entry_point() {
             default_view_resolution,
             max_view_resolution,
             refresh_rates,
-            foveated_encoding: if platform == Platform::ThinkRealityVRX {
-                // VRX enumerates eye gaze through an optional API layer, but
-                // the selected stable extension set does not enable it.
-                selected_exts.ext_eye_gaze_interaction
-            } else {
-                platform != Platform::Unknown
-            },
+            // ALVR's fixed-center encoding reconstruction uses its GLES shader,
+            // independently of eye tracking and OpenXR swapchain foveation.
+            foveated_encoding: platform != Platform::Unknown,
             encoder_high_profile: platform != Platform::Unknown,
             encoder_10_bits: platform != Platform::Unknown,
             encoder_av1: matches!(
@@ -562,6 +523,11 @@ pub fn entry_point() {
         let mut event_storage = xr::EventDataBuffer::new();
         let mut headset_is_worn = true;
         'render_loop: loop {
+            if shutdown.value() {
+                drop(stream_context.take());
+                core_context.pause();
+                break 'session_loop;
+            }
             while let Some(event) = xr_instance.poll_event(&mut event_storage).unwrap() {
                 match event {
                     xr::Event::EventsLost(event) => {
@@ -573,6 +539,28 @@ pub fn entry_point() {
                             xr_session
                                 .begin(xr::ViewConfigurationType::PRIMARY_STEREO)
                                 .unwrap();
+
+                            #[cfg(target_os = "android")]
+                            if platform == Platform::ThinkRealityVRX {
+                                // This thread performs xrWaitFrame and submits GLES frames.
+                                // Spaces only raises priority for RENDERER_WORKER.
+                                let settings = xr_instance
+                                    .exts()
+                                    .khr_android_thread_settings
+                                    .expect("VRX requires XR_KHR_android_thread_settings");
+                                let result = unsafe {
+                                    (settings.set_android_application_thread)(
+                                        xr_session.as_raw(),
+                                        xr::AndroidThreadTypeKHR::RENDERER_WORKER,
+                                        libc::gettid() as u32,
+                                    )
+                                };
+                                assert_eq!(
+                                    result,
+                                    xr::sys::Result::SUCCESS,
+                                    "Qualcomm render-thread registration failed: {result:?}"
+                                );
+                            }
 
                             core_context.resume();
 
@@ -587,7 +575,16 @@ pub fn entry_point() {
 
                             core_context.pause();
 
-                            xr_session.end().ok();
+                            if platform == Platform::ThinkRealityVRX {
+                                xr_session.end().expect("Failed to end VRX OpenXR session");
+                            } else {
+                                xr_session.end().ok();
+                            }
+                        }
+                        xr::SessionState::EXITING if platform == Platform::ThinkRealityVRX => {
+                            drop(stream_context.take());
+                            core_context.pause();
+                            break 'session_loop;
                         }
                         xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
                             break 'render_loop;
@@ -641,6 +638,11 @@ pub fn entry_point() {
                         lobby.update_hud_message(&message);
                     }
                     ClientCoreEvent::StreamingStarted(config) => {
+                        if platform == Platform::ThinkRealityVRX {
+                            vrx::validate_stream_settings(&config.settings).unwrap_or_else(|e| {
+                                panic!("ThinkReality VRX stream configuration: {e:#}")
+                            });
+                        }
                         let config = ParsedStreamConfig::new(&config);
 
                         let context = StreamContext::new(
@@ -697,6 +699,11 @@ pub fn entry_point() {
                         }
                     }
                     ClientCoreEvent::RealTimeConfig(config) => {
+                        if platform == Platform::ThinkRealityVRX {
+                            vrx::validate_real_time_config(&config).unwrap_or_else(|e| {
+                                panic!("ThinkReality VRX real-time configuration: {e:#}")
+                            });
+                        }
                         if config.passthrough.is_some() && passthrough_layer.is_none() {
                             passthrough_layer = PassthroughLayer::new(&xr_session, platform).ok();
                         } else if config.passthrough.is_none() && passthrough_layer.is_some() {
@@ -709,6 +716,7 @@ pub fn entry_point() {
                                 &xr_session,
                                 xr::PerfSettingsDomainEXT::CPU,
                                 cpu_performance_level.clone(),
+                                platform,
                             );
                         }
 
@@ -718,6 +726,7 @@ pub fn entry_point() {
                                 &xr_session,
                                 xr::PerfSettingsDomainEXT::GPU,
                                 gpu_performance_level.clone(),
+                                platform,
                             );
                         }
 
@@ -785,6 +794,10 @@ pub fn entry_point() {
                 let time = to_xr_time(display_time);
                 error!("End frame failed! {e}, timestamp: {display_time:?}, time: {time:?}");
 
+                if platform == Platform::ThinkRealityVRX {
+                    panic!("VRX xrEndFrame failed: {e}; no substitute frame is submitted");
+                }
+
                 if !platform.is_vive() {
                     xr_frame_stream
                         .end(
@@ -798,7 +811,8 @@ pub fn entry_point() {
         }
     }
 
-    // grapics_context is dropped here
+    // graphics_context is dropped here, after the session and input threads.
+    platform
 }
 
 #[allow(unused)]
@@ -813,13 +827,40 @@ fn xr_runtime_now(xr_instance: &xr::Instance) -> Option<xr::Time> {
 #[unsafe(no_mangle)]
 fn android_main(app: android_activity::AndroidApp) {
     use android_activity::{InputStatus, MainEvent, PollEvent};
+    use jni::refs::Reference;
 
-    let rendering_thread = thread::spawn(|| {
+    let shutdown = Arc::new(RelaxedAtomic::new(false));
+    let render_shutdown = Arc::clone(&shutdown);
+    let rendering_thread = thread::spawn(move || {
         // workaround for the Pico runtime
         let context = ndk_context::android_context();
         let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) };
-        vm.attach_current_thread(|_env| {
-            entry_point();
+        vm.attach_current_thread(|env| {
+            // Also close the VRX activity after a fatal initialization/config
+            // error instead of leaving an activity with a dead render thread.
+            // Resume unwinding below so the original failure remains visible.
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&render_shutdown)));
+            let platform = match &outcome {
+                Ok(platform) => *platform,
+                Err(_) => alvr_system_info::platform(None, None),
+            };
+            if platform == Platform::ThinkRealityVRX && !render_shutdown.value() {
+                // EXITING must end the Android experience too. The C entry point
+                // leaves activity ownership with its embedding application.
+                env.call_method(
+                    unsafe {
+                        jni::objects::JObject::global_kind_from_raw(context.context().cast())
+                    },
+                    jni::jni_str!("finishAndRemoveTask"),
+                    jni::jni_sig!("()V"),
+                    &[],
+                )?;
+            }
+
+            if let Err(payload) = outcome {
+                std::panic::resume_unwind(payload);
+            }
 
             jni::errors::Result::Ok(())
         })
@@ -830,6 +871,7 @@ fn android_main(app: android_activity::AndroidApp) {
     while !should_quit {
         app.poll_events(Some(Duration::from_millis(100)), |event| match event {
             PollEvent::Main(MainEvent::Destroy) => {
+                shutdown.set(true);
                 should_quit = true;
             }
             PollEvent::Main(MainEvent::InputAvailable) => {
@@ -841,51 +883,18 @@ fn android_main(app: android_activity::AndroidApp) {
         });
     }
 
-    // Note: the quit event is sent from OpenXR too, this will return rather quicly.
+    // Android destruction also signals the render loop when no XR event arrives.
     rendering_thread.join().unwrap();
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{negotiated_view_resolutions, vrx_extensions};
-    use alvr_common::glam::UVec2;
-    use alvr_system_info::Platform;
+    use super::vrx_extensions;
 
     #[test]
-    fn vrx_negotiates_vendor_eye_buffer_resolution() {
-        let (recommended, max) = negotiated_view_resolutions(
-            Platform::ThinkRealityVRX,
-            UVec2::new(2280, 2280),
-            UVec2::new(2280, 2280),
-        );
-        assert_eq!(recommended, UVec2::new(2160, 2160));
-        assert_eq!(max, UVec2::new(2280, 2280));
-    }
-
-    #[test]
-    fn other_platforms_keep_runtime_resolution() {
-        let recommended = UVec2::new(2064, 2208);
-        let max = UVec2::new(2208, 2208);
-        assert_eq!(
-            negotiated_view_resolutions(Platform::Pico4, recommended, max),
-            (recommended, max)
-        );
-    }
-
-    #[test]
-    fn vrx_preserves_non_square_runtime_recommendation() {
-        let recommended = UVec2::new(3040, 1520);
-        let max = UVec2::new(3040, 1520);
-        assert_eq!(
-            negotiated_view_resolutions(Platform::ThinkRealityVRX, recommended, max),
-            (recommended, max)
-        );
-    }
-
-    #[test]
-    fn vrx_stable_fallback_keeps_validated_extensions() {
+    fn vrx_requires_only_validated_extensions() {
         let extensions = vrx_extensions();
-        assert!(extensions.qcom_tracking_optimization_settings);
+        assert!(!extensions.qcom_tracking_optimization_settings);
         assert!(extensions.ext_performance_settings);
         assert!(extensions.fb_display_refresh_rate);
         assert!(extensions.khr_convert_timespec_time);

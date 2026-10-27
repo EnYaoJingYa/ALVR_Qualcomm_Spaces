@@ -128,7 +128,26 @@ pub fn replace_client_openxr_manifest(from_pattern: &str, to: &str) {
     fs::write(manifest_path, manifest_string).unwrap();
 }
 
-pub fn package_client_openxr(flavor: ReleaseFlavor, skip_admin_priv: bool) {
+pub fn package_client_openxr(
+    flavor: ReleaseFlavor,
+    skip_admin_priv: bool,
+    spaces_aar: Option<&std::path::Path>,
+) {
+    // Validate the source before rebuilding dependencies. Do not rely on a
+    // manually copied binary in the directory this command is about to clear.
+    if let Some(aar) = spaces_aar {
+        assert!(
+            matches!(flavor, ReleaseFlavor::GitHub),
+            "Spaces packaging requires GitHub flavor"
+        );
+        if let Ok(deps) = afs::deps_dir().join("android_openxr").canonicalize() {
+            assert!(
+                !aar.canonicalize().unwrap().starts_with(deps),
+                "Keep the Spaces source AAR outside the rebuilt dependency directory"
+            );
+        }
+        dependencies::prepare_spaces_loader(aar);
+    }
     fs::remove_dir_all(afs::deps_dir().join("android_openxr")).ok();
 
     let openxr_selection = match flavor {
@@ -138,6 +157,10 @@ pub fn package_client_openxr(flavor: ReleaseFlavor, skip_admin_priv: bool) {
     };
 
     dependencies::build_android_deps(skip_admin_priv, false, openxr_selection);
+    if let Some(aar) = spaces_aar {
+        dependencies::prepare_spaces_loader(aar);
+        dependencies::validate_spaces_loader();
+    }
 
     if !matches!(flavor, ReleaseFlavor::GitHub) {
         replace_client_openxr_manifest(

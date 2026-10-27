@@ -1,9 +1,9 @@
-use super::VideoDecoderConfig;
+use super::{VideoDecoderConfig, initialization::DecoderInitialization};
 use alvr_common::{
     RelaxedAtomic, ToAny,
     anyhow::{Context, Result, anyhow, bail},
     error, info,
-    parking_lot::{Condvar, Mutex},
+    parking_lot::Mutex,
     warn,
 };
 use alvr_session::{CodecType, MediacodecPropType};
@@ -196,7 +196,7 @@ fn decoder_lifecycle(
     frame_result_callback: Weak<impl Fn(Result<Duration>) + Send + Sync + 'static>,
     running: Arc<RelaxedAtomic>,
     decoder_sink: Arc<Mutex<Option<SharedMediaCodec>>>,
-    decoder_ready_notifier: Arc<Condvar>,
+    decoder_initialization: Arc<DecoderInitialization>,
     image_queue: Arc<Mutex<VecDeque<QueuedImage>>>,
     image_reader: &mut ImageReader,
 ) -> Result<()> {
@@ -284,6 +284,13 @@ fn decoder_lifecycle(
 
     let decoder = if config.force_software_decoder {
         decoder_setup(config.codec, true, &format, &image_reader)?
+    } else if alvr_system_info::platform(None, None) == alvr_system_info::Platform::ThinkRealityVRX
+    {
+        // Report the requested decoder failure on VRX. Never retry in software
+        // and make a native decode failure appear to be a working stream.
+        decoder_setup(config.codec, false, &format, &image_reader).context(
+            "VRX MediaCodec initialization failed; automatic software fallback is disabled",
+        )?
     } else {
         // Hardware decoders sometimes fail at the CSD-0.
         // May as well fall back if this occurs.
@@ -305,7 +312,7 @@ fn decoder_lifecycle(
 
         *decoder_lock = Some(Arc::clone(&decoder));
 
-        decoder_ready_notifier.notify_one();
+        decoder_initialization.complete(Ok(()));
     }
 
     let mut error_counter = 0;
@@ -356,14 +363,14 @@ pub fn video_decoder_split(
 ) -> Result<(VideoDecoderSink, VideoDecoderSource)> {
     let running = Arc::new(RelaxedAtomic::new(true));
     let decoder_sink = Arc::new(Mutex::new(None::<SharedMediaCodec>));
-    let decoder_ready_notifier = Arc::new(Condvar::new());
+    let decoder_initialization = Arc::new(DecoderInitialization::default());
     let image_queue = Arc::new(Mutex::new(VecDeque::<QueuedImage>::new()));
 
     let dequeue_thread = thread::spawn({
         let config = config.clone();
         let running = Arc::clone(&running);
         let decoder_sink = Arc::clone(&decoder_sink);
-        let decoder_ready_notifier = Arc::clone(&decoder_ready_notifier);
+        let decoder_initialization = Arc::clone(&decoder_initialization);
         let image_queue = Arc::clone(&image_queue);
         move || {
             const MAX_BUFFERING_FRAMES: usize = 10;
@@ -376,6 +383,8 @@ pub fn video_decoder_split(
             ) {
                 Ok(reader) => reader,
                 Err(e) => {
+                    decoder_initialization
+                        .complete(Err(format!("ImageReader creation failed: {e}")));
                     frame_result_callback(Err(anyhow!("{e}")));
                     return;
                 }
@@ -389,10 +398,11 @@ pub fn video_decoder_split(
                 Arc::downgrade(&frame_result_callback),
                 running,
                 decoder_sink,
-                decoder_ready_notifier,
+                Arc::clone(&decoder_initialization),
                 Arc::clone(&image_queue),
                 &mut image_reader,
             ) {
+                decoder_initialization.complete(Err(format!("{e:#}")));
                 frame_result_callback(Err(e));
             }
 
@@ -402,13 +412,10 @@ pub fn video_decoder_split(
 
     // Make sure the decoder is ready: we don't want to try to enqueue frame and lose them, to avoid
     // image corruption.
-    {
-        let mut decoder_lock = decoder_sink.lock();
-
-        if decoder_lock.is_none() {
-            // No spurious wakeups
-            decoder_ready_notifier.wait(&mut decoder_lock);
-        }
+    if let Err(error) = decoder_initialization.wait() {
+        running.set(false);
+        dequeue_thread.join().ok();
+        bail!("Decoder initialization failed: {error}");
     }
 
     let sink = VideoDecoderSink {

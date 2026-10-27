@@ -22,11 +22,25 @@ pub fn swapchain_format(
     gfx_ctx: &GraphicsContext,
     session: &xr::Session<xr::OpenGlEs>,
     enable_hdr: bool,
+    platform: alvr_system_info::Platform,
 ) -> u32 {
     gfx_ctx.make_current();
 
     let formats = session.enumerate_swapchain_formats().unwrap();
-    alvr_graphics::choose_swapchain_format(&formats, enable_hdr)
+    let format = alvr_graphics::choose_swapchain_format(&formats, enable_hdr);
+    if platform == alvr_system_info::Platform::ThinkRealityVRX {
+        assert!(
+            formats.contains(&format),
+            "VRX runtime has no supported GLES swapchain format: {formats:?}"
+        );
+        // GL_RGBA16F is required for ALVR's HDR output; an SDR format would
+        // silently discard the requested dynamic range.
+        assert!(
+            !enable_hdr || format == 0x881A,
+            "VRX HDR requires a GL_RGBA16F swapchain; available formats: {formats:?}"
+        );
+    }
+    format
 }
 
 #[allow(unused_variables)]

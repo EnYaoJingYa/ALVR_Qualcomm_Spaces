@@ -2,7 +2,7 @@ pub mod commands;
 mod parse;
 
 use alvr_common::anyhow::Result;
-use alvr_common::{dbg_connection, error, warn};
+use alvr_common::{dbg_connection, error, parking_lot::Mutex, warn};
 use alvr_session::WiredClientAutoLaunchConfig;
 use alvr_system_info::{
     ClientFlavor, PACKAGE_NAME_GITHUB_DEV, PACKAGE_NAME_GITHUB_STABLE, PACKAGE_NAME_STORE,
@@ -17,6 +17,31 @@ pub enum WiredConnectionStatus {
 
 pub struct WiredConnection {
     adb_path: String,
+    vrx_launches: Mutex<VrxLaunchState>,
+}
+
+// A running VRX app or a successful auto-launch consumes the launch opportunity
+// until USB disconnects or the user disables/re-enables auto-launch.
+#[derive(Default)]
+struct VrxLaunchState {
+    observed: HashSet<(String, String)>,
+}
+
+impl VrxLaunchState {
+    fn update_devices(&mut self, serials: &HashSet<&str>, enabled: bool) {
+        self.observed
+            .retain(|(serial, _)| enabled && serials.contains(serial.as_str()));
+    }
+
+    fn was_observed(&self, serial: &str, package: &str) -> bool {
+        self.observed
+            .contains(&(serial.to_owned(), package.to_owned()))
+    }
+
+    fn observe(&mut self, serial: &str, package: &str) {
+        self.observed
+            .insert((serial.to_owned(), package.to_owned()));
+    }
 }
 
 impl WiredConnection {
@@ -26,7 +51,10 @@ impl WiredConnection {
     ) -> Result<Self> {
         let adb_path = commands::require_adb(layout, download_progress_callback)?;
 
-        Ok(Self { adb_path })
+        Ok(Self {
+            adb_path,
+            vrx_launches: Mutex::default(),
+        })
     }
 
     pub fn setup(
@@ -36,15 +64,26 @@ impl WiredConnection {
         client_type: &ClientFlavor,
         client_autolaunch: Option<WiredClientAutoLaunchConfig>,
     ) -> Result<WiredConnectionStatus> {
-        let Some(device_serial) = commands::list_devices(&self.adb_path)?
-            .into_iter()
-            .filter_map(|d| d.serial)
-            .find(|s| !s.starts_with("127.0.0.1"))
-        else {
+        let devices = commands::list_devices(&self.adb_path)?;
+        self.vrx_launches.lock().update_devices(
+            &devices
+                .iter()
+                .filter(|d| matches!(d.connection_state, Some(parse::ConnectionState::Device)))
+                .filter_map(|d| d.serial.as_deref())
+                .collect(),
+            client_autolaunch.is_some(),
+        );
+        let Some(device) = devices.iter().find(|d| {
+            d.serial
+                .as_ref()
+                .is_some_and(|s| !s.starts_with("127.0.0.1"))
+        }) else {
             return Ok(WiredConnectionStatus::NotReady(
                 "No wired devices found".to_owned(),
             ));
         };
+        let device_serial = device.serial.as_ref().unwrap();
+        let is_vrx = device.model.as_deref() == Some("VRX");
 
         let ports = HashSet::from([control_port, stream_port]);
         let forwarded_ports: HashSet<u16> =
@@ -69,6 +108,16 @@ impl WiredConnection {
 
         if commands::get_process_id(&self.adb_path, &device_serial, &process_name)?.is_none() {
             if let Some(client_autolaunch) = client_autolaunch {
+                if is_vrx
+                    && self
+                        .vrx_launches
+                        .lock()
+                        .was_observed(device_serial, &process_name)
+                {
+                    return Ok(WiredConnectionStatus::NotReady(
+                        "ALVR was closed on VRX; open it in the headset to reconnect".to_owned(),
+                    ));
+                }
                 if client_autolaunch.boot_delay > 0 {
                     match commands::get_uptime(&self.adb_path, &device_serial) {
                         Ok(uptime) => {
@@ -84,7 +133,14 @@ impl WiredConnection {
                     }
                 }
 
-                commands::start_application(&self.adb_path, &device_serial, &process_name)?;
+                if is_vrx {
+                    commands::start_vrx_application(&self.adb_path, &device_serial, &process_name)?;
+                    self.vrx_launches
+                        .lock()
+                        .observe(device_serial, &process_name);
+                } else {
+                    commands::start_application(&self.adb_path, &device_serial, &process_name)?;
+                }
                 Ok(WiredConnectionStatus::NotReady(
                     "Starting ALVR client".to_owned(),
                 ))
@@ -93,13 +149,43 @@ impl WiredConnection {
                     "ALVR client is not running".to_owned(),
                 ))
             }
-        } else if !commands::is_activity_resumed(&self.adb_path, &device_serial, &process_name)? {
-            Ok(WiredConnectionStatus::NotReady(
-                "ALVR client is paused".to_owned(),
-            ))
         } else {
-            Ok(WiredConnectionStatus::Ready)
+            if is_vrx {
+                self.vrx_launches
+                    .lock()
+                    .observe(device_serial, &process_name);
+            }
+            if !commands::is_activity_resumed(&self.adb_path, &device_serial, &process_name)? {
+                Ok(WiredConnectionStatus::NotReady(
+                    "ALVR client is paused".to_owned(),
+                ))
+            } else {
+                Ok(WiredConnectionStatus::Ready)
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vrx_exit_is_respected_until_disconnect_or_autolaunch_toggle() {
+        let mut state = VrxLaunchState::default();
+        let devices = HashSet::from(["PS0012P0", "other"]);
+        state.update_devices(&devices, true);
+        assert!(!state.was_observed("PS0012P0", "alvr.client.dev"));
+        state.observe("PS0012P0", "alvr.client.dev");
+        state.update_devices(&devices, true);
+        assert!(state.was_observed("PS0012P0", "alvr.client.dev"));
+        assert!(!state.was_observed("other", "alvr.client.dev"));
+        state.update_devices(&HashSet::from(["other"]), true);
+        assert!(!state.was_observed("PS0012P0", "alvr.client.dev"));
+        state.observe("PS0012P0", "alvr.client.dev");
+        state.update_devices(&devices, false);
+        state.update_devices(&devices, true);
+        assert!(!state.was_observed("PS0012P0", "alvr.client.dev"));
     }
 }
 

@@ -24,6 +24,7 @@ USAGE:
 
 SUBCOMMANDS:
     prepare-deps        Download and compile streamer and client external dependencies
+    prepare-spaces      Install the pinned official Spaces 0.23.0 ARM64 loader
     build-streamer      Build streamer, then copy binaries to build folder
     build-launcher      Build launcher, then copy binaries to build folder
     build-server-lib    Build a C-ABI ALVR server library and header
@@ -57,8 +58,10 @@ FLAGS:
     --all-targets       For prepare-deps and build-client-lib subcommand, will build for all android supported ABI targets
     --meta-store        For package-client subcommand, build for Meta Store
     --pico-store        For package-client subcommand, build for Pico Store
+    --spaces            Validate the official Spaces loader before build-client/package-client
 
 ARGS:
+    --spaces-loader-aar <PATH> Official VRMR SDK 0.23.0 UE5.3 libopenxr_loader.aar
     --platform <NAME>   Can be one of: windows, linux, macos, android. Can be omitted
     --version <VERSION> Specify version to set with the bump-versions subcommand
     --root <PATH>       Installation root. By default no root is set and paths are calculated using
@@ -184,6 +187,9 @@ fn main() {
         let keep_config = args.contains("--keep-config");
         let link_stdcpp = !args.contains("--no-stdcpp");
         let all_targets = args.contains("--all-targets");
+        let spaces = args.contains("--spaces");
+        let spaces_aar: Option<std::path::PathBuf> =
+            args.opt_value_from_str("--spaces-loader-aar").unwrap();
 
         let platform: Option<String> = args.opt_value_from_str("--platform").unwrap();
         let platform = platform.as_deref().map(|platform| match platform {
@@ -207,6 +213,11 @@ fn main() {
 
         if args.finish().is_empty() {
             match subcommand.as_str() {
+                "prepare-spaces" => {
+                    dependencies::prepare_spaces_loader(spaces_aar.as_deref().expect(
+                        "prepare-spaces requires --spaces-loader-aar <official 0.23.0 AAR>",
+                    ));
+                }
                 "prepare-deps" => {
                     if let Some(platform) = platform {
                         if matches!(platform, BuildPlatform::Android) {
@@ -233,7 +244,15 @@ fn main() {
                 }
                 "build-launcher" => build::build_launcher(profile, false),
                 "build-server-lib" => build::build_server_lib(profile, None, false),
-                "build-client" => build::build_android_client(profile),
+                "build-client" => {
+                    if let Some(aar) = spaces_aar.as_deref() {
+                        dependencies::prepare_spaces_loader(aar);
+                    }
+                    if spaces || spaces_aar.is_some() {
+                        dependencies::validate_spaces_loader();
+                    }
+                    build::build_android_client(profile);
+                }
                 "build-client-lib" => {
                     build::build_android_client_core_lib(profile, link_stdcpp, all_targets)
                 }
@@ -256,7 +275,15 @@ fn main() {
                     packaging::package_streamer(platform, for_ci, !no_nvidia, gpl, root)
                 }
                 "package-launcher" => packaging::package_launcher(),
-                "package-client" => packaging::package_client_openxr(package_flavor, for_ci),
+                "package-client" => {
+                    if spaces {
+                        assert!(
+                            spaces_aar.is_some(),
+                            "package-client --spaces requires --spaces-loader-aar because dependencies are rebuilt"
+                        );
+                    }
+                    packaging::package_client_openxr(package_flavor, for_ci, spaces_aar.as_deref());
+                }
                 "package-client-lib" => packaging::package_client_lib(link_stdcpp, all_targets),
                 "format" => format::format(),
                 "check-format" => format::check_format(),

@@ -56,6 +56,12 @@ version = 1
 [[package.metadata.android.uses_feature]]
 opengles_version = [3, 2]
 required = true
+[[package.metadata.android.uses_feature]]
+name = "snapdragon.spaces.controllers"
+required = false
+[[package.metadata.android.uses_feature]]
+name = "snapdragon.spaces.room_scale"
+required = false
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.ACCESS_WIFI_STATE"
@@ -72,12 +78,18 @@ name = "android.permission.RECORD_AUDIO"
 [[package.metadata.android.uses_permission]]
 name = "android.permission.WAKE_LOCK"
 [[package.metadata.android.uses_permission]]
+name = "android.permission.VIBRATE"
+[[package.metadata.android.uses_permission]]
 name = "org.khronos.openxr.permission.OPENXR"
 [[package.metadata.android.uses_permission]]
 name = "org.khronos.openxr.permission.OPENXR_SYSTEM"
+[[package.metadata.android.uses_permission]]
+name = "com.qualcomm.qti.qxr.QXRServiceClientPermission"
 
 [[package.metadata.android.queries.intent]]
 actions = ["org.khronos.openxr.OpenXRRuntimeService"]
+[[package.metadata.android.queries.intent]]
+actions = ["com.qualcomm.qti.openxr.spaces.intent.action.BIND"]
 [[package.metadata.android.queries.provider]]
 name = "org.khronos.openxr"
 authorities = "org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker"
@@ -112,6 +124,9 @@ categories = [
 
 [[package.metadata.android.application.meta_data]]
 name = "spaces.version"
+value = "0.23.0"
+[[package.metadata.android.application.meta_data]]
+name = "com.qualcomm.snapdragon.spaces.minApiLevel"
 value = "0.22.0"
 
 # Quest entries
@@ -164,7 +179,7 @@ name = "wave.feature.eyetracking"
 required = false
 [[package.metadata.android.uses_feature]]
 name = "wave.feature.handtracking"
-required = true
+required = false
 [[package.metadata.android.uses_feature]]
 name = "wave.feature.lipexpression"
 required = false
@@ -219,10 +234,10 @@ value = "vr_only"
 # Android XR
 [[package.metadata.android.uses_feature]]
 name = "android.software.xr.api.spatial"
-required = true
+required = false
 [[package.metadata.android.uses_feature]]
 name = "android.software.xr.api.openxr"
-required = true
+required = false
 [[package.metadata.android.uses_feature]]
 name = "android.software.xr.input.controller"
 required = false
