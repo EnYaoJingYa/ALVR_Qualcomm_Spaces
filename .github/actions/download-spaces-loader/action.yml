@@ -1,0 +1,34 @@
+name: Download pinned Spaces loader
+description: Fetch the official Spaces 0.23.0 source AAR from an authorized download URL.
+inputs:
+  aar-url:
+    description: HTTPS URL for the official VRMR 0.23.0 UE5.3 libopenxr_loader.aar.
+    required: true
+outputs:
+  aar-path:
+    description: Absolute path to the verified source AAR, outside the rebuilt dependencies.
+    value: ${{ steps.download.outputs.aar-path }}
+runs:
+  using: composite
+  steps:
+    - name: Download and verify the source AAR
+      id: download
+      shell: bash
+      env:
+        SPACES_LOADER_AAR_URL: ${{ inputs.aar-url }}
+      run: |
+        set -euo pipefail
+        if [[ -z "$SPACES_LOADER_AAR_URL" ]]; then
+          echo "::error::Configure SPACES_LOADER_AAR_URL with an authorized HTTPS URL for the official VRMR 0.23.0 UE5.3 loader AAR."
+          exit 1
+        fi
+        aar_path="$GITHUB_WORKSPACE/build/spaces-sdk-0.23.0/libopenxr_loader.aar"
+        mkdir -p "$(dirname "$aar_path")"
+        curl --fail --silent --show-error --location \
+          --proto '=https' --proto-redir '=https' \
+          --output "$aar_path" "$SPACES_LOADER_AAR_URL"
+        if ! echo "be239f71f8abdc88730218f2a23988db5e47355aabe85fa65699888f4a2c4132  $aar_path" | sha256sum --check --status; then
+          echo "::error::Spaces AAR SHA-256 mismatch; the official VRMR 0.23.0 UE5.3 loader AAR is required."
+          exit 1
+        fi
+        echo "aar-path=$aar_path" >> "$GITHUB_OUTPUT"

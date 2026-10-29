@@ -229,6 +229,18 @@ Move to the root directory of the project, then run this command:
 cargo xtask prepare-deps --platform android
 ```
 
+This fork's GitHub APK includes ThinkReality VRX support and requires the pinned
+Spaces 0.23.0 loader. Extract `libopenxr_loader.aar` from the official VRMR 0.23.0
+UE5.3 plugin and keep it outside `deps/android_openxr`. From the repository root:
+
+```bash
+cargo xtask prepare-spaces --spaces-loader-aar /path/to/libopenxr_loader.aar
+```
+
+The source AAR and its ARM64 library are checked against fixed SHA-256 values.
+See [VRX build instructions](../docs/vrx-spaces-support.md) for the official source,
+hashes, and CI configuration. Missing or incorrect loaders stop APK builds.
+
 Before building the app, Android has to have us to agree to the licenses otherwise building the app will halt and fail. To accept the agreements, follow the instructions for your corresponding OS:
 
 * Windows:
@@ -251,7 +263,7 @@ Next up is the proper build of the app. Run the following:
 cargo xtask build-client --release
 ```
 
-The built APK will be in `build/alvr_client_quest`. You can then use adb or SideQuest to install it to your headset.
+The built APK will be in `build/alvr_client_android/alvr_client_android.apk`. You can then use adb or SideQuest to install it to your headset.
 
 To build and run:
 

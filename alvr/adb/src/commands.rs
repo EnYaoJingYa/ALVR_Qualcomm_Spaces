@@ -222,6 +222,28 @@ pub fn start_vrx_application(
     Ok(())
 }
 
+pub fn configure_vrx_low_latency(adb_path: &str, device_serial: &str) -> Result<()> {
+    for (property, value) in [
+        ("debug.openxr.cond.wait.enable", "1"),
+        ("debug.openxr.wait.fence.enable", "1"),
+    ] {
+        let output = get_command(
+            adb_path,
+            &["-s", device_serial, "shell", "setprop", property, value],
+        )
+        .output()
+        .with_context(|| format!("Failed to set VRX runtime property {property}"))?;
+        anyhow::ensure!(
+            output.status.success(),
+            "VRX runtime property {property} failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(())
+}
+
 //////////
 // Devices
 

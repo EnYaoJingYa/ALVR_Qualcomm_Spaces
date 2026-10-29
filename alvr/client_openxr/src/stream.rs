@@ -32,6 +32,102 @@ use std::{
 };
 
 const DECODER_MAX_TIMEOUT_MULTIPLIER: f32 = 0.8;
+
+fn decoder_poll_deadline(platform: Platform, frame_interval: Duration) -> Option<Instant> {
+    if platform == Platform::ThinkRealityVRX {
+        // Do not block inside the OpenXR frame window waiting for decode. If
+        // the decoder has no frame ready, reuse the last staged image and keep
+        // the low-latency submission phase.
+        None
+    } else {
+        Some(
+            Instant::now()
+                + Duration::from_secs_f32(
+                    frame_interval.as_secs_f32() * DECODER_MAX_TIMEOUT_MULTIPLIER,
+                ),
+        )
+    }
+}
+
+fn poll_decoder_frame<T>(
+    mut poll: impl FnMut() -> Option<T>,
+    deadline: Option<Instant>,
+) -> Option<T> {
+    let mut frame = poll();
+
+    if let Some(deadline) = deadline {
+        while frame.is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_micros(500));
+            frame = poll();
+        }
+    }
+
+    frame
+}
+
+fn openxr_display_time(
+    platform: Platform,
+    video_timestamp: Duration,
+    predicted_display_time: Duration,
+    predicted_display_period: Duration,
+    use_custom_reprojection: bool,
+) -> Duration {
+    if platform == Platform::ThinkRealityVRX || use_custom_reprojection {
+        // OpenXR requires xrEndFrame::displayTime to use the monotonic time
+        // returned by xrWaitFrame. VRX rejects a video timestamp that is
+        // repeated across display frames as a duplicate frame submission.
+        predicted_display_time.saturating_sub(
+            predicted_display_period
+                * (platform == Platform::ThinkRealityVRX)
+                    .then(vrx_display_lead_frames)
+                    .unwrap_or(0),
+        )
+    } else {
+        // Keep the established ALVR presentation timestamp on other runtimes.
+        Duration::max(
+            video_timestamp,
+            predicted_display_time.saturating_sub(Duration::from_secs(1)),
+        )
+    }
+}
+
+#[cfg(target_os = "android")]
+fn vrx_display_lead_frames() -> u32 {
+    use std::{
+        ffi::{CStr, CString, c_char},
+        sync::LazyLock,
+    };
+
+    unsafe extern "C" {
+        fn __system_property_get(name: *const c_char, value: *mut c_char) -> i32;
+    }
+
+    static LEAD_FRAMES: LazyLock<u32> = LazyLock::new(|| {
+        let Ok(name) = CString::new("debug.alvr.vrx_display_lead_frames") else {
+            return 0;
+        };
+        let mut value = [0 as c_char; 92];
+        let len = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr()) };
+        if len <= 0 {
+            return 0;
+        }
+
+        unsafe { CStr::from_ptr(value.as_ptr()) }
+            .to_str()
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+            .min(3)
+    });
+
+    *LEAD_FRAMES
+}
+
+#[cfg(not(target_os = "android"))]
+fn vrx_display_lead_frames() -> u32 {
+    0
+}
+
 fn input_poll_subdivisions(platform: Platform) -> u32 {
     if platform == Platform::ThinkRealityVRX {
         // The vendor player sends one VSync-aligned pose update per 90 Hz frame.
@@ -56,18 +152,25 @@ struct VsyncSignal {
 }
 
 impl VsyncSignal {
+    fn sequence(&self) -> u64 {
+        *self.sequence.lock()
+    }
+
     fn notify(&self) {
-        *self.sequence.lock() += 1;
+        let mut sequence = self.sequence.lock();
+        *sequence = sequence.wrapping_add(1);
         self.condvar.notify_one();
     }
 
-    fn wait_for_next(&self, running: &RelaxedAtomic) -> bool {
+    fn wait_for_next(&self, running: &RelaxedAtomic, observed: &mut u64) -> bool {
         let mut sequence = self.sequence.lock();
-        let observed = *sequence;
-        while *sequence == observed && running.value() {
+        while *sequence == *observed && running.value() {
             self.condvar.wait(&mut sequence);
         }
 
+        // Remember the last consumed frame across input polls, including when
+        // the render thread notifies before this thread starts waiting.
+        *observed = *sequence;
         running.value()
     }
 }
@@ -378,6 +481,7 @@ impl StreamContext {
             let poll_subdivisions = input_poll_subdivisions(self.core_context.platform());
             let sync_to_vsync = self.core_context.platform() == Platform::ThinkRealityVRX;
             let vsync_signal = Arc::clone(&self.vsync_signal);
+            let vsync_sequence = vsync_signal.sequence();
             let running = Arc::clone(&self.input_thread_running);
             move || {
                 stream_input_loop(
@@ -390,6 +494,7 @@ impl StreamContext {
                     poll_subdivisions,
                     sync_to_vsync,
                     &vsync_signal,
+                    vsync_sequence,
                     running,
                 )
             }
@@ -443,17 +548,12 @@ impl StreamContext {
         vsync_time: Duration,
     ) -> (ProjectionLayerBuilder<'_>, Duration) {
         let xr_vsync_time = xr::Time::from_nanos(vsync_time.as_nanos() as _);
-        let frame_poll_deadline = Instant::now()
-            + Duration::from_secs_f32(
-                frame_interval.as_secs_f32() * DECODER_MAX_TIMEOUT_MULTIPLIER,
-            );
-        let mut frame_result = None;
-        if let Some((_, source)) = &mut self.decoder {
-            while frame_result.is_none() && Instant::now() < frame_poll_deadline {
-                frame_result = source.get_frame();
-                thread::sleep(Duration::from_micros(500));
-            }
-        }
+        let frame_poll_deadline =
+            decoder_poll_deadline(self.core_context.platform(), frame_interval);
+        let frame_result = self
+            .decoder
+            .as_mut()
+            .and_then(|(_, source)| poll_decoder_frame(|| source.get_frame(), frame_poll_deadline));
 
         let (timestamp, frame_metadata, buffer_ptr) =
             if let Some((timestamp, buffer_ptr)) = frame_result {
@@ -506,12 +606,13 @@ impl StreamContext {
         // altered FoVs based on settings and view conversions done for canting.
         let input_view_params = view_params;
         let mut output_view_params = input_view_params;
-        // Avoid passing invalid timestamp to runtime.
-        // `timestamp` is generally a current vsync time, but may be repeated if frames are
-        // dropped. Some runtimes dislike it if the timestamp is repeated for too long, so after
-        // one second we begin presenting a lagged vsync time instead.
-        let mut openxr_display_time =
-            Duration::max(timestamp, vsync_time.saturating_sub(Duration::from_secs(1)));
+        let openxr_display_time = openxr_display_time(
+            self.core_context.platform(),
+            timestamp,
+            vsync_time,
+            frame_interval,
+            self.use_custom_reprojection,
+        );
 
         // (shinyquagsire23) I don't entirely trust runtimes to implement CompositionLayerProjectionView
         // correctly, but if we do trust them, avoid doing rotation ourselves. Otherwise, rerender.
@@ -527,8 +628,6 @@ impl StreamContext {
                     fov: crate::from_xr_fov(current_headset_views[1].fov),
                 },
             ];
-
-            openxr_display_time = vsync_time;
         }
 
         self.renderer.render(
@@ -638,6 +737,7 @@ fn stream_input_loop(
     poll_subdivisions: u32,
     sync_to_vsync: bool,
     vsync_signal: &VsyncSignal,
+    mut vsync_sequence: u64,
     running: Arc<RelaxedAtomic>,
 ) {
     let mut last_controller_poses = [Pose::IDENTITY; 2];
@@ -646,8 +746,14 @@ fn stream_input_loop(
 
     let mut deadline = Instant::now();
     let frame_interval = Duration::from_secs_f32(1.0 / refresh_rate);
+    #[cfg(target_os = "android")]
+    if sync_to_vsync
+        && crate::android_debug_property("debug.alvr.tracking_diagnostics").as_deref() == Some("1")
+    {
+        error!("VRX tracked input loop started");
+    }
     while running.value() {
-        if sync_to_vsync && !vsync_signal.wait_for_next(&running) {
+        if sync_to_vsync && !vsync_signal.wait_for_next(&running, &mut vsync_sequence) {
             break;
         }
 
@@ -786,9 +892,16 @@ fn stream_input_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::{RelaxedAtomic, VsyncSignal, input_poll_subdivisions, needs_limited_range_fix};
+    use super::{
+        RelaxedAtomic, VsyncSignal, decoder_poll_deadline, input_poll_subdivisions,
+        needs_limited_range_fix, openxr_display_time, poll_decoder_frame,
+    };
     use alvr_system_info::Platform;
-    use std::{sync::Arc, thread, time::Duration};
+    use std::{
+        sync::{Arc, mpsc},
+        thread,
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn vrx_uses_one_input_poll_per_display_frame() {
@@ -804,17 +917,95 @@ mod tests {
     }
 
     #[test]
+    fn vrx_uses_the_runtime_predicted_display_time() {
+        let task_video_timestamp = Duration::from_millis(1_000);
+        let task_predicted_display_time = Duration::from_millis(1_011);
+
+        assert_eq!(
+            openxr_display_time(
+                Platform::ThinkRealityVRX,
+                task_video_timestamp,
+                task_predicted_display_time,
+                Duration::from_millis(11),
+                false,
+            ),
+            task_predicted_display_time
+        );
+        assert_eq!(
+            openxr_display_time(
+                Platform::Quest3,
+                task_video_timestamp,
+                task_predicted_display_time,
+                Duration::from_millis(11),
+                false,
+            ),
+            task_video_timestamp
+        );
+    }
+
+    #[test]
+    fn vrx_does_not_wait_for_a_decoder_frame_inside_the_openxr_frame() {
+        let frame_interval = Duration::from_secs_f32(1.0 / 90.0);
+
+        let deadline = decoder_poll_deadline(Platform::ThinkRealityVRX, frame_interval);
+        assert_eq!(deadline, None);
+
+        let mut poll_count = 0;
+        assert_eq!(
+            poll_decoder_frame(
+                || {
+                    poll_count += 1;
+                    None::<()>
+                },
+                deadline,
+            ),
+            None
+        );
+        assert_eq!(poll_count, 1);
+
+        assert!(
+            decoder_poll_deadline(Platform::Quest3, frame_interval)
+                .is_some_and(|deadline| deadline > Instant::now())
+        );
+    }
+
+    #[test]
     fn vsync_signal_wakes_the_input_thread() {
+        check_vsync_wake(false);
+    }
+
+    #[test]
+    fn vsync_notification_before_wait_is_not_lost() {
+        check_vsync_wake(true);
+    }
+
+    fn check_vsync_wake(notify_before_wait: bool) {
         let signal = Arc::new(VsyncSignal::default());
         let running = Arc::new(RelaxedAtomic::new(true));
+        let mut observed = signal.sequence();
+        if notify_before_wait {
+            // Deterministically exercise a delayed input thread. There will
+            // be no later frame notification to rescue a lost wake-up.
+            signal.notify();
+        }
         let waiter_signal = Arc::clone(&signal);
         let waiter_running = Arc::clone(&running);
-        let waiter = thread::spawn(move || waiter_signal.wait_for_next(&waiter_running));
+        let (sender, receiver) = mpsc::channel();
+        let waiter = thread::spawn(move || {
+            let woke = waiter_signal.wait_for_next(&waiter_running, &mut observed);
+            sender.send(woke).unwrap();
+        });
 
-        thread::sleep(Duration::from_millis(10));
+        if !notify_before_wait {
+            signal.notify();
+        }
+        let result = receiver.recv_timeout(Duration::from_secs(2));
+
+        // Unblock and join the worker even if the assertion would fail.
+        running.set(false);
         signal.notify();
-
-        assert!(waiter.join().unwrap());
+        waiter.join().unwrap();
+        assert_eq!(result, Ok(true));
     }
 
     #[test]
@@ -824,6 +1015,7 @@ mod tests {
 
         signal.notify();
 
-        assert!(!signal.wait_for_next(&running));
+        let mut observed = signal.sequence();
+        assert!(!signal.wait_for_next(&running, &mut observed));
     }
 }

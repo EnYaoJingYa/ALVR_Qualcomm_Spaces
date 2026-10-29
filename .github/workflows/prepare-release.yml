@@ -139,6 +139,12 @@ jobs:
           ref: ${{ needs.prepare_release.outputs.release_ref }}
           submodules: true
 
+      - name: Fetch official Spaces loader
+        id: spaces
+        uses: ./.github/actions/download-spaces-loader
+        with:
+          aar-url: ${{ secrets.SPACES_LOADER_AAR_URL }}
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/setup-java@v5
@@ -159,7 +165,7 @@ jobs:
         env:
           RUST_BACKTRACE: 1
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: cargo xtask package-client --ci
+        run: cargo xtask package-client --ci --spaces-loader-aar "${{ steps.spaces.outputs.aar-path }}"
 
       - name: Sign APK
         uses: ilharp/sign-android-release@v2

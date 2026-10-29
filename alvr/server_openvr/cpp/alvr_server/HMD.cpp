@@ -231,8 +231,10 @@ void Hmd::StartStreaming() {
     if (this->device_class == vr::TrackedDeviceClass_HMD) {
 #ifdef _WIN32
         m_encoder = std::make_shared<CEncoder>();
+        bool encoder_initialized = false;
         try {
             m_encoder->Initialize(m_D3DRender);
+            encoder_initialized = true;
         } catch (Exception e) {
             Error(
                 "Your GPU does not meet the requirements for video encoding. %s %s\n%s %s\n",
@@ -241,6 +243,10 @@ void Hmd::StartStreaming() {
                 "Failed to initialize CEncoder:",
                 e.what()
             );
+        }
+        if (!encoder_initialized) {
+            m_encoder.reset();
+            return;
         }
         m_encoder->Start();
 

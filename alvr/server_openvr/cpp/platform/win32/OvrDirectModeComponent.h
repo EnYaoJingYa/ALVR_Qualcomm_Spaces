@@ -71,6 +71,7 @@ private:
     vr::HmdQuaternion_t m_framePoseRotation;
     uint64_t m_targetTimestampNs;
     uint64_t m_prevTargetTimestampNs;
+    uint64_t m_lastSubmittedTargetTimestampNs;
 
     std::mutex m_presentMutex;
 };

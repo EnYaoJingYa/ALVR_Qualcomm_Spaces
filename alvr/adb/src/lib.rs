@@ -24,11 +24,35 @@ pub struct WiredConnection {
 // until USB disconnects or the user disables/re-enables auto-launch.
 #[derive(Default)]
 struct VrxLaunchState {
+    enabled: bool,
     observed: HashSet<(String, String)>,
+}
+
+fn is_online_nonloopback_device(device: &parse::Device) -> bool {
+    matches!(
+        device.connection_state,
+        Some(parse::ConnectionState::Device)
+    ) && device
+        .serial
+        .as_ref()
+        .is_some_and(|serial| !serial.starts_with("127.0.0.1"))
+}
+
+fn select_wired_device(devices: &[parse::Device]) -> Option<&parse::Device> {
+    devices
+        .iter()
+        .filter(|device| is_online_nonloopback_device(device))
+        .find(|device| device.model.as_deref() == Some("VRX"))
+        .or_else(|| {
+            devices
+                .iter()
+                .find(|device| is_online_nonloopback_device(device))
+        })
 }
 
 impl VrxLaunchState {
     fn update_devices(&mut self, serials: &HashSet<&str>, enabled: bool) {
+        self.enabled = enabled;
         self.observed
             .retain(|(serial, _)| enabled && serials.contains(serial.as_str()));
     }
@@ -39,8 +63,10 @@ impl VrxLaunchState {
     }
 
     fn observe(&mut self, serial: &str, package: &str) {
-        self.observed
-            .insert((serial.to_owned(), package.to_owned()));
+        if self.enabled {
+            self.observed
+                .insert((serial.to_owned(), package.to_owned()));
+        }
     }
 }
 
@@ -73,17 +99,16 @@ impl WiredConnection {
                 .collect(),
             client_autolaunch.is_some(),
         );
-        let Some(device) = devices.iter().find(|d| {
-            d.serial
-                .as_ref()
-                .is_some_and(|s| !s.starts_with("127.0.0.1"))
-        }) else {
+        let Some(device) = select_wired_device(&devices) else {
             return Ok(WiredConnectionStatus::NotReady(
                 "No wired devices found".to_owned(),
             ));
         };
         let device_serial = device.serial.as_ref().unwrap();
         let is_vrx = device.model.as_deref() == Some("VRX");
+        if is_vrx {
+            commands::configure_vrx_low_latency(&self.adb_path, device_serial)?;
+        }
 
         let ports = HashSet::from([control_port, stream_port]);
         let forwarded_ports: HashSet<u16> =
@@ -170,6 +195,43 @@ impl WiredConnection {
 mod tests {
     use super::*;
 
+    fn test_device(serial: &str, model: &str, state: parse::ConnectionState) -> parse::Device {
+        parse::Device {
+            connection_state: Some(state),
+            device: Some("kona".into()),
+            model: Some(model.into()),
+            product: Some("kona".into()),
+            serial: Some(serial.into()),
+            transport_type: Some(parse::TransportType::Usb),
+        }
+    }
+
+    #[test]
+    fn wired_device_selection_prefers_the_online_vrx() {
+        let devices = [
+            test_device("192.168.1.13:5555", "LFQ1", parse::ConnectionState::Device),
+            test_device("PS0012P0", "VRX", parse::ConnectionState::Device),
+        ];
+
+        assert_eq!(
+            select_wired_device(&devices).unwrap().serial.as_deref(),
+            Some("PS0012P0")
+        );
+    }
+
+    #[test]
+    fn wired_device_selection_does_not_choose_an_offline_vrx() {
+        let devices = [
+            test_device("PS0012P0", "VRX", parse::ConnectionState::Offline),
+            test_device("192.168.1.13:5555", "LFQ1", parse::ConnectionState::Device),
+        ];
+
+        assert_eq!(
+            select_wired_device(&devices).unwrap().serial.as_deref(),
+            Some("192.168.1.13:5555")
+        );
+    }
+
     #[test]
     fn vrx_exit_is_respected_until_disconnect_or_autolaunch_toggle() {
         let mut state = VrxLaunchState::default();
@@ -186,6 +248,26 @@ mod tests {
         state.update_devices(&devices, false);
         state.update_devices(&devices, true);
         assert!(!state.was_observed("PS0012P0", "alvr.client.dev"));
+    }
+
+    #[test]
+    fn running_vrx_does_not_consume_a_launch_while_autolaunch_is_disabled() {
+        let mut state = VrxLaunchState::default();
+        let devices = HashSet::from(["PS0012P0"]);
+        state.update_devices(&devices, true);
+        state.observe("PS0012P0", "alvr.client.dev");
+
+        // setup() still sees the running/paused process after updating the
+        // disabled setting, and observes it again in that same call.
+        state.update_devices(&devices, false);
+        state.observe("PS0012P0", "alvr.client.dev");
+        assert!(!state.was_observed("PS0012P0", "alvr.client.dev"));
+
+        // The process has now exited and the user explicitly enables launch.
+        state.update_devices(&devices, true);
+        assert!(!state.was_observed("PS0012P0", "alvr.client.dev"));
+        state.observe("PS0012P0", "alvr.client.dev");
+        assert!(state.was_observed("PS0012P0", "alvr.client.dev"));
     }
 }
 

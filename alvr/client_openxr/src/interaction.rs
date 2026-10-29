@@ -21,6 +21,45 @@ use xr::SpaceLocationFlags;
 
 const IPD_CHANGE_EPS: f32 = 0.001;
 
+#[cfg(target_os = "android")]
+fn vrx_tracking_diagnostics_enabled(platform: Platform) -> bool {
+    platform == Platform::ThinkRealityVRX
+        && crate::android_debug_property("debug.alvr.tracking_diagnostics").as_deref() == Some("1")
+}
+
+#[cfg(target_os = "android")]
+fn log_vrx_head_tracking(
+    head_location: &xr::SpaceLocation,
+    head_velocity: &xr::SpaceVelocity,
+    view_flags: xr::ViewStateFlags,
+    views: &[xr::View],
+) {
+    use std::{
+        sync::{LazyLock, Mutex},
+        time::Instant,
+    };
+
+    static LAST_LOG: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
+    let mut last_log = LAST_LOG.lock().unwrap();
+    let now = Instant::now();
+    if last_log.is_some_and(|last| now.duration_since(last).as_millis() < 500) {
+        return;
+    }
+    *last_log = Some(now);
+
+    error!(
+        "VRX head tracking: location_flags={:?}, velocity_flags={:?}, position={:?}, orientation={:?}, linear_velocity={:?}, view_flags={:?}, eye_positions=[{:?}, {:?}]",
+        head_location.location_flags,
+        head_velocity.velocity_flags,
+        head_location.pose.position,
+        head_location.pose.orientation,
+        head_velocity.linear_velocity,
+        view_flags,
+        views.first().map(|view| view.pose.position),
+        views.get(1).map(|view| view.pose.position),
+    );
+}
+
 // Most OpenXR runtime, including Meta's one, do not follow perfectly the specification regarding
 // controller pose. The Z axis should point down through the center of the controller grip, the X
 // axis should go out perpendicular from the palm, and the position should be aligned roughtly with
@@ -678,26 +717,41 @@ pub fn get_head_data(
 ) -> Option<(DeviceMotion, Option<[ViewParams; 2]>)> {
     let xr_time = crate::to_xr_time(time);
 
-    let (head_location, head_velocity) = view_reference_space
-        .relate(stage_reference_space, xr_time)
-        .ok()?;
+    let head_result = view_reference_space.relate(stage_reference_space, xr_time);
+    #[cfg(target_os = "android")]
+    if let Err(e) = &head_result
+        && vrx_tracking_diagnostics_enabled(platform)
+    {
+        use std::sync::Once;
+        static RELATE_ERROR: Once = Once::new();
+        RELATE_ERROR.call_once(|| error!("VRX head tracking: view-to-stage relate failed: {e}"));
+    }
+    let (head_location, head_velocity) = head_result.ok()?;
+
+    let views_result = xr_session.locate_views(
+        xr::ViewConfigurationType::PRIMARY_STEREO,
+        xr_time,
+        stage_reference_space,
+    );
+    #[cfg(target_os = "android")]
+    if let Err(e) = &views_result
+        && vrx_tracking_diagnostics_enabled(platform)
+    {
+        use std::sync::Once;
+        static LOCATE_ERROR: Once = Once::new();
+        LOCATE_ERROR.call_once(|| error!("VRX head tracking: locate_views failed: {e}"));
+    }
+    let (view_flags, views) = views_result.ok()?;
+
+    #[cfg(target_os = "android")]
+    if vrx_tracking_diagnostics_enabled(platform) {
+        log_vrx_head_tracking(&head_location, &head_velocity, view_flags, &views);
+    }
 
     if !head_location
         .location_flags
         .contains(xr::SpaceLocationFlags::ORIENTATION_VALID)
-    {
-        return None;
-    }
-
-    let (view_flags, views) = xr_session
-        .locate_views(
-            xr::ViewConfigurationType::PRIMARY_STEREO,
-            xr_time,
-            stage_reference_space,
-        )
-        .ok()?;
-
-    if !view_flags.contains(xr::ViewStateFlags::POSITION_VALID)
+        || !view_flags.contains(xr::ViewStateFlags::POSITION_VALID)
         || !view_flags.contains(xr::ViewStateFlags::ORIENTATION_VALID)
     {
         return None;

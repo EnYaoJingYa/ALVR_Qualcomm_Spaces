@@ -31,6 +31,7 @@ use std::{ffi::CStr, path::Path, rc::Rc, sync::Arc, thread, time::Duration};
 use stream::StreamContext;
 
 const VRX_MAX_REFRESH_RATE_HZ: f32 = 90.0;
+const VRX_RENDER_EYE_RESOLUTION: UVec2 = UVec2::new(2144, 2144);
 
 fn vrx_extensions() -> xr::ExtensionSet {
     let mut extensions = xr::ExtensionSet::default();
@@ -43,6 +44,7 @@ fn vrx_extensions() -> xr::ExtensionSet {
     extensions.fb_display_refresh_rate = true;
     extensions.khr_convert_timespec_time = true;
     extensions.khr_opengl_es_enable = true;
+    extensions.qcom_tracking_optimization_settings = true;
     extensions.other = [b"XR_QCOM_component_versioning\0".to_vec()].into();
     extensions
 }
@@ -166,7 +168,47 @@ fn set_vrx_performance_level(
     }
 }
 
+fn effective_user_presence(platform: Platform, runtime_user_present: bool) -> bool {
+    // The VRX runtime can report "not present" while the headset is worn.
+    // Keeping its OpenXR session active avoids SteamVR entering standby.
+    platform == Platform::ThinkRealityVRX || runtime_user_present
+}
+
+fn reported_max_view_resolution(platform: Platform, runtime_max: UVec2) -> UVec2 {
+    if platform == Platform::ThinkRealityVRX {
+        VRX_RENDER_EYE_RESOLUTION
+    } else {
+        runtime_max
+    }
+}
+
+fn tuned_qxr_config(config_json: &[u8]) -> Option<String> {
+    let mut config = serde_json::from_slice::<serde_json::Value>(config_json).ok()?;
+
+    *config.pointer_mut("/sensor/maxPredictedTime")? = serde_json::json!(15);
+    *config.pointer_mut("/display/timeWarpWaitFramePercentage")? = serde_json::json!(0.0);
+
+    serde_json::to_string(&config).ok()
+}
+
 fn configure_vrx_runtime(xr_instance: &xr::Instance, xr_session: &xr::Session<xr::OpenGlEs>) {
+    let tracking_optimization = xr_instance
+        .exts()
+        .qcom_tracking_optimization_settings
+        .expect("ThinkReality VRX must support XR_QCOM_tracking_optimization_settings");
+    let result = unsafe {
+        (tracking_optimization.set_tracking_optimization_settings_hint)(
+            xr_session.as_raw(),
+            xr::sys::TrackingOptimizationSettingsDomainQCOM::ALL,
+            xr::sys::TrackingOptimizationSettingsHintQCOM::HIGH_POWER_PRIORIZATION,
+        )
+    };
+    assert_eq!(
+        result,
+        xr::sys::Result::SUCCESS,
+        "Qualcomm high-performance tracking hint failed: {result:?}"
+    );
+
     set_vrx_performance_level(
         xr_instance,
         xr_session,
@@ -231,6 +273,17 @@ fn run(shutdown: &RelaxedAtomic) -> Platform {
 
     // Using a provisional platform, before we can get the runtime info
     let provisional_platform = alvr_system_info::platform(None, None);
+
+    #[cfg(target_os = "android")]
+    if provisional_platform == Platform::ThinkRealityVRX {
+        // NativeActivity starts android_main before the Java Activity's
+        // onCreate returns, so this must happen here rather than in Java.
+        match configure_vrx_low_latency_properties() {
+            Ok(()) => info!("VRX runtime low-latency properties set before OpenXR initialization"),
+            Err(code) => error!("Failed to set VRX runtime low-latency properties: {code}"),
+        }
+    }
+
     let (loader_suffix, openxr_version) = match provisional_platform {
         Platform::Quest1 => ("_quest1", LEGACY_OPENXR_VERSION),
         Platform::PicoNeo3
@@ -406,7 +459,11 @@ fn run(shutdown: &RelaxedAtomic) -> Platform {
             views_config[0].max_image_rect_height,
         );
         let default_view_resolution = runtime_recommended_view_resolution;
-        let max_view_resolution = runtime_max_view_resolution;
+        // On VRX, the runtime's max image rect is smaller than the stable
+        // 2144x2144 per-eye stream resolution. Reporting that rect to the
+        // server causes the stream resolution to be downscaled.
+        let max_view_resolution =
+            reported_max_view_resolution(platform, runtime_max_view_resolution);
         info!(
             "OpenXR view resolution: recommended {default_view_resolution}, max {max_view_resolution}"
         );
@@ -618,9 +675,10 @@ fn run(shutdown: &RelaxedAtomic) -> Platform {
                     }
                     xr::Event::UserPresenceChangedEXT(event) => {
                         debug!("user present: {:?}", event.is_user_present());
-                        headset_is_worn = event.is_user_present();
+                        headset_is_worn =
+                            effective_user_presence(platform, event.is_user_present());
 
-                        core_context.send_proximity_state(event.is_user_present());
+                        core_context.send_proximity_state(headset_is_worn);
                     }
                     _ => (),
                 }
@@ -824,6 +882,282 @@ fn xr_runtime_now(xr_instance: &xr::Instance) -> Option<xr::Time> {
 }
 
 #[cfg(target_os = "android")]
+fn android_debug_property(name: &str) -> Option<String> {
+    use std::ffi::{CStr, CString, c_char};
+
+    unsafe extern "C" {
+        fn __system_property_get(name: *const c_char, value: *mut c_char) -> i32;
+    }
+
+    let name = CString::new(name).ok()?;
+    let mut value = [0 as c_char; 92];
+    let len = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr()) };
+    (len > 0)
+        .then(|| unsafe { CStr::from_ptr(value.as_ptr()) })
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+#[cfg(target_os = "android")]
+fn configure_vrx_low_latency_properties() -> Result<(), i32> {
+    use std::ffi::{CString, c_char};
+
+    unsafe extern "C" {
+        fn __system_property_set(name: *const c_char, value: *const c_char) -> i32;
+    }
+
+    for (name, value) in [
+        ("debug.openxr.cond.wait.enable", "1"),
+        ("debug.openxr.wait.fence.enable", "1"),
+    ] {
+        let name = CString::new(name).unwrap();
+        let value = CString::new(value).unwrap();
+        let result = unsafe { __system_property_set(name.as_ptr(), value.as_ptr()) };
+        if result != 0 {
+            return Err(result);
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+fn probe_qxr_core_client() {
+    use jni::sys::{JavaVM, jobject};
+    use std::{
+        ffi::{CString, c_char, c_void},
+        fs::OpenOptions,
+        io::Write,
+        ptr,
+    };
+
+    if android_debug_property("debug.alvr.probe_qxr").as_deref() != Some("1") {
+        return;
+    }
+    let diagnostic_path = "/sdcard/Android/data/alvr.client.dev/files/native-qxr-probe.log";
+    let write_diagnostic = |message: String| {
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(diagnostic_path)
+        {
+            let _ = writeln!(file, "{message}");
+        }
+    };
+
+    unsafe extern "C" {
+        fn dlopen(filename: *const std::ffi::c_char, flags: i32) -> *mut std::ffi::c_void;
+        fn dlsym(
+            handle: *mut std::ffi::c_void,
+            symbol: *const std::ffi::c_char,
+        ) -> *mut std::ffi::c_void;
+        fn dlerror() -> *const std::ffi::c_char;
+    }
+
+    type CreateFn = unsafe extern "C" fn(*mut JavaVM, jobject, *const std::ffi::c_char) -> *mut u8;
+    type InitFn = unsafe extern "C" fn(*mut c_void) -> u32;
+    type GetParamFn =
+        unsafe extern "C" fn(*mut c_void, *const c_char, *mut u32, *mut c_char) -> i32;
+
+    let library = CString::new("/system_ext/app/RVRPlayer/lib/arm64/libqxrcoreclient.so").unwrap();
+    let symbol = CString::new("_Z20QXRCoreClient_CreateP7_JavaVMP8_jobjectPKc").unwrap();
+    let handle = unsafe { dlopen(library.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+    if handle.is_null() {
+        let error = unsafe { dlerror() };
+        let error = if error.is_null() {
+            "unknown dlopen error"
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(error) }
+                .to_str()
+                .unwrap_or("invalid dlopen error")
+        };
+        error!("QXR low-latency probe: dlopen failed: {error}");
+        return;
+    }
+
+    let create = unsafe { dlsym(handle, symbol.as_ptr()) };
+    if create.is_null() {
+        error!("QXR low-latency probe: QXRCoreClient_Create symbol missing");
+        return;
+    }
+    let create: CreateFn = unsafe { std::mem::transmute(create) };
+    let context = ndk_context::android_context();
+    let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) };
+    let class_result = vm.attach_current_thread(|env| {
+        env.find_class(jni::jni_str!(
+            "com/qualcomm/qti/qxrsocketfetcher/QXRSocketFetcher"
+        ))
+        .map(|class| !class.is_null())
+    });
+    error!("QXR low-latency probe: QXRSocketFetcher class={class_result:?}");
+
+    let wrapper = unsafe { create(context.vm().cast(), context.context().cast(), ptr::null()) };
+    if wrapper.is_null() {
+        error!("QXR low-latency probe: QXRCoreClient_Create returned null");
+        return;
+    }
+
+    let descriptor = unsafe { (wrapper.add(8) as *const usize).read_unaligned() } as *const u8;
+    if descriptor.is_null() {
+        error!("QXR low-latency probe: interface descriptor is null");
+        return;
+    }
+    let method_count = unsafe { (descriptor as *const u32).read_unaligned() };
+    let methods = unsafe { (descriptor.add(8) as *const usize).read_unaligned() } as *const usize;
+    let object = unsafe { (wrapper.add(16) as *const usize).read_unaligned() } as *mut c_void;
+    error!(
+        "QXR low-latency probe: wrapper={wrapper:p} object={object:p} descriptor={descriptor:p} methods={methods:p} count={method_count}"
+    );
+    write_diagnostic(format!(
+        "wrapper={wrapper:p} object={object:p} descriptor={descriptor:p} methods={methods:p} count={method_count}"
+    ));
+
+    if object.is_null() || methods.is_null() {
+        error!("QXR low-latency probe: wrapper object or method table is null");
+        return;
+    }
+
+    let init_address = unsafe { methods.add(3).read_unaligned() };
+    let get_param_address = unsafe { methods.add(10).read_unaligned() };
+    if init_address == 0 || get_param_address == 0 {
+        error!(
+            "QXR low-latency probe: required methods missing init={init_address:#x} get_param={get_param_address:#x}"
+        );
+        return;
+    }
+
+    let init: InitFn = unsafe { std::mem::transmute(init_address) };
+    let init_result = unsafe { init(object) };
+    error!("QXR low-latency probe: init returned {init_result}");
+    write_diagnostic(format!("init returned {init_result}"));
+    if init_result == 0 {
+        return;
+    }
+
+    let get_param: GetParamFn = unsafe { std::mem::transmute(get_param_address) };
+    for name in [
+        "device-mode",
+        "compositor-mode",
+        "service-version",
+        "sdk-config-file",
+        "qvrservice-viewer-connection-type",
+        "qvrservice-device-mode",
+        "qvr-device-mode",
+        "openxr-device-config-file",
+        "maxPredictedTime",
+        "sensor.maxPredictedTime",
+        "timeWarpWaitStrip2Percentage",
+        "display.timeWarpWaitStrip2Percentage",
+        "timeWarpWaitFramePercentage",
+        "display.timeWarpWaitFramePercentage",
+        "timeWarpWaitBias",
+        "display.timeWarpWaitBias",
+        "synchronizeToHMDVSync",
+        "display.synchronizeToHMDVSync",
+    ] {
+        let Ok(name) = CString::new(name) else {
+            continue;
+        };
+        let mut length = 0u32;
+        let length_result =
+            unsafe { get_param(object, name.as_ptr(), &mut length, ptr::null_mut()) };
+        if length_result != 0 {
+            error!(
+                "QXR low-latency probe: GetParam({:?}) length query returned {length_result}",
+                name.to_string_lossy()
+            );
+            write_diagnostic(format!(
+                "GetParam({:?}) length query returned {length_result}",
+                name.to_string_lossy()
+            ));
+            continue;
+        }
+        if length == 0 || length > 64 * 1024 {
+            error!(
+                "QXR low-latency probe: GetParam({:?}) invalid length {length}",
+                name.to_string_lossy()
+            );
+            write_diagnostic(format!(
+                "GetParam({:?}) invalid length {length}",
+                name.to_string_lossy()
+            ));
+            continue;
+        }
+
+        let mut value = vec![0u8; length as usize + 1];
+        let value_result = unsafe {
+            get_param(
+                object,
+                name.as_ptr(),
+                &mut length,
+                value.as_mut_ptr().cast(),
+            )
+        };
+        if value_result != 0 {
+            error!(
+                "QXR low-latency probe: GetParam({:?}) failed with {value_result}",
+                name.to_string_lossy()
+            );
+            write_diagnostic(format!(
+                "GetParam({:?}) failed with {value_result}",
+                name.to_string_lossy()
+            ));
+            continue;
+        }
+
+        value.truncate(length as usize);
+        if let Some(nul) = value.iter().position(|&byte| byte == 0) {
+            value.truncate(nul);
+        }
+        error!(
+            "QXR low-latency probe: GetParam({:?}) = {:?}",
+            name.to_string_lossy(),
+            String::from_utf8_lossy(&value)
+        );
+        write_diagnostic(format!(
+            "GetParam({:?}) = {:?}",
+            name.to_string_lossy(),
+            String::from_utf8_lossy(&value)
+        ));
+
+        if name.to_bytes() == b"openxr-device-config-file"
+            && let Ok(config) = serde_json::from_slice::<serde_json::Value>(&value)
+        {
+            let max_predicted_time = config
+                .pointer("/sensor/maxPredictedTime")
+                .and_then(serde_json::Value::as_u64);
+            let wait_frame_percentage = config
+                .pointer("/display/timeWarpWaitFramePercentage")
+                .and_then(serde_json::Value::as_f64);
+            let wait_strip2_percentage = config
+                .pointer("/display/timeWarpWaitStrip2Percentage")
+                .and_then(serde_json::Value::as_f64);
+            write_diagnostic(format!(
+                "candidate tuning: maxPredictedTime={max_predicted_time:?} -> 15, \
+                 timeWarpWaitFramePercentage={wait_frame_percentage:?} -> 0.0, \
+                 timeWarpWaitStrip2Percentage={wait_strip2_percentage:?} (unchanged)"
+            ));
+            if let Some(tuned_config) = tuned_qxr_config(&value) {
+                write_diagnostic(format!(
+                    "hypothetical tuned config (not applied; QVR parameters are read-only): \
+                     {tuned_config}"
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_qualcomm_qti_qxrsocketfetcher_AlvrVrxActivity_nativeVrxProbeInit(
+    _env: *mut jni::sys::JNIEnv,
+    _class: jni::sys::jclass,
+) {
+    alvr_client_core::init_logging();
+    probe_qxr_core_client();
+}
+
+#[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: android_activity::AndroidApp) {
     use android_activity::{InputStatus, MainEvent, PollEvent};
@@ -889,16 +1223,65 @@ fn android_main(app: android_activity::AndroidApp) {
 
 #[cfg(test)]
 mod tests {
-    use super::vrx_extensions;
+    use super::{
+        effective_user_presence, reported_max_view_resolution, tuned_qxr_config, vrx_extensions,
+    };
+    use alvr_system_info::Platform;
 
     #[test]
     fn vrx_requires_only_validated_extensions() {
         let extensions = vrx_extensions();
-        assert!(!extensions.qcom_tracking_optimization_settings);
+        assert!(extensions.qcom_tracking_optimization_settings);
         assert!(extensions.ext_performance_settings);
         assert!(extensions.fb_display_refresh_rate);
         assert!(extensions.khr_convert_timespec_time);
         assert!(extensions.khr_opengl_es_enable);
         assert!(!extensions.other.is_empty());
+    }
+
+    #[test]
+    fn vrx_ignores_unreliable_user_presence_events() {
+        assert!(effective_user_presence(Platform::ThinkRealityVRX, false));
+        assert!(effective_user_presence(Platform::ThinkRealityVRX, true));
+        assert!(!effective_user_presence(Platform::Pico4, false));
+        assert!(effective_user_presence(Platform::Pico4, true));
+    }
+
+    #[test]
+    fn vrx_reports_physical_panel_resolution() {
+        assert_eq!(
+            reported_max_view_resolution(
+                Platform::ThinkRealityVRX,
+                alvr_common::glam::UVec2::new(3040, 1520)
+            ),
+            alvr_common::glam::UVec2::new(2144, 2144)
+        );
+        assert_eq!(
+            reported_max_view_resolution(
+                Platform::Quest3,
+                alvr_common::glam::UVec2::new(2064, 2208)
+            ),
+            alvr_common::glam::UVec2::new(2064, 2208)
+        );
+    }
+
+    #[test]
+    fn qxr_tuning_preserves_config_and_changes_only_timing_fields() {
+        let source = br#"{
+            "sensor": {"maxPredictedTime": 30, "minPoseQuality": 0.7},
+            "display": {
+                "timeWarpWaitFramePercentage": 0.5,
+                "timeWarpWaitStrip2Percentage": 0,
+                "displayRefreshRate": 90
+            }
+        }"#;
+        let tuned: serde_json::Value =
+            serde_json::from_str(&tuned_qxr_config(source).unwrap()).unwrap();
+
+        assert_eq!(tuned["sensor"]["maxPredictedTime"], 15);
+        assert_eq!(tuned["sensor"]["minPoseQuality"], 0.7);
+        assert_eq!(tuned["display"]["timeWarpWaitFramePercentage"], 0.0);
+        assert_eq!(tuned["display"]["timeWarpWaitStrip2Percentage"], 0);
+        assert_eq!(tuned["display"]["displayRefreshRate"], 90);
     }
 }

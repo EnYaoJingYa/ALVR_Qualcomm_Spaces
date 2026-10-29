@@ -5,7 +5,10 @@ OvrDirectModeComponent::OvrDirectModeComponent(
 )
     : m_pD3DRender(pD3DRender)
     , m_poseHistory(poseHistory)
-    , m_submitLayer(0) { }
+    , m_submitLayer(0)
+    , m_targetTimestampNs(0)
+    , m_prevTargetTimestampNs(0)
+    , m_lastSubmittedTargetTimestampNs(0) { }
 
 void OvrDirectModeComponent::SetEncoder(std::shared_ptr<CEncoder> pEncoder) {
     m_pEncoder = pEncoder;
@@ -214,8 +217,6 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
 
     m_presentMutex.lock();
 
-    ReportPresent(m_targetTimestampNs, 0);
-
     bool useMutex = true;
 
     IDXGIKeyedMutex* pKeyedMutex = NULL;
@@ -223,10 +224,18 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
     uint32_t layerCount = m_submitLayer;
     m_submitLayer = 0;
 
-    if (m_prevTargetTimestampNs == m_targetTimestampNs) {
+    // SteamVR can call Present several times for the same tracking timestamp.
+    // Encoding every repeat floods the transport with expensive, redundant
+    // frames. Keep zero timestamps eligible because they also cover retries
+    // where SteamVR could not match a pose yet.
+    if (m_targetTimestampNs != 0
+        && m_lastSubmittedTargetTimestampNs == m_targetTimestampNs) {
         Debug("Discard duplicated frame. FrameIndex=%llu (Ignoring)", m_targetTimestampNs);
-        // return;
+        m_presentMutex.unlock();
+        return;
     }
+
+    ReportPresent(m_targetTimestampNs, 0);
 
     ID3D11Texture2D* pSyncTexture = m_pD3DRender->GetSharedTexture((HANDLE)syncTexture);
     if (!pSyncTexture) {
@@ -264,6 +273,7 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
     }
 
     ReportComposed(m_targetTimestampNs, 0);
+    m_lastSubmittedTargetTimestampNs = m_targetTimestampNs;
 
     if (m_pEncoder) {
         m_pEncoder->NewFrameReady();

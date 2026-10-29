@@ -1,18 +1,55 @@
-use alvr_common::{HEAD_ID, SlidingWindowAverage};
+use alvr_common::{HEAD_ID, SlidingWindowAverage, info};
 use alvr_events::{BitrateDirectives, EventType, GraphStatistics, StatisticsSummary};
 use alvr_packets::ClientStatistics;
 use std::{
     collections::{HashMap, VecDeque},
+    fs::OpenOptions,
+    io::Write,
+    path::PathBuf,
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
 const FULL_REPORT_INTERVAL: Duration = Duration::from_millis(500);
 const EPS_INTERVAL: Duration = Duration::from_micros(1);
+static TRACE_STATS: OnceLock<bool> = OnceLock::new();
+static TRACE_STATS_FILE: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+fn trace_stats_enabled() -> bool {
+    *TRACE_STATS.get_or_init(|| {
+        std::env::var_os("ALVR_TRACE_STATS").is_some()
+            || std::env::temp_dir()
+                .join("alvr-trace-stats.enabled")
+                .exists()
+    })
+}
+
+fn trace_stats_path() -> Option<&'static PathBuf> {
+    TRACE_STATS_FILE
+        .get_or_init(|| {
+            if let Some(path) = std::env::var_os("ALVR_TRACE_STATS") {
+                Some(if path == "1" {
+                    PathBuf::from("latency-breakdown.log")
+                } else {
+                    PathBuf::from(path)
+                })
+            } else if std::env::temp_dir()
+                .join("alvr-trace-stats.enabled")
+                .exists()
+            {
+                Some(std::env::temp_dir().join("alvr-latency-breakdown.log"))
+            } else {
+                None
+            }
+        })
+        .as_ref()
+}
 
 pub struct HistoryFrame {
     target_timestamp: Duration,
     tracking_received: Instant,
     frame_present: Instant,
+    frame_presented: bool,
     frame_composed: Instant,
     frame_encoded: Instant,
     video_packet_bytes: usize,
@@ -26,6 +63,7 @@ impl Default for HistoryFrame {
             target_timestamp: Duration::ZERO,
             tracking_received: now,
             frame_present: now,
+            frame_presented: false,
             frame_composed: now,
             frame_encoded: now,
             video_packet_bytes: 0,
@@ -115,9 +153,14 @@ impl StatisticsManager {
         {
             let now = Instant::now() - offset;
 
-            self.last_frame_present_interval =
-                now.saturating_duration_since(self.last_frame_present_instant);
-            self.last_frame_present_instant = now;
+            // The same frame can be submitted more than once. Only its first
+            // presentation contributes to the server frame interval.
+            if !frame.frame_presented {
+                self.last_frame_present_interval =
+                    now.saturating_duration_since(self.last_frame_present_instant);
+                self.last_frame_present_instant = now;
+                frame.frame_presented = true;
+            }
 
             frame.frame_present = now;
         }
@@ -151,7 +194,7 @@ impl StatisticsManager {
         {
             frame.frame_encoded = Instant::now();
 
-            frame.video_packet_bytes = bytes_count;
+            frame.video_packet_bytes += bytes_count;
 
             frame
                 .frame_encoded
@@ -217,6 +260,44 @@ impl StatisticsManager {
                 1.0 / Duration::max(client_stats.frame_interval, EPS_INTERVAL).as_secs_f32();
             let server_fps =
                 1.0 / Duration::max(self.last_frame_present_interval, EPS_INTERVAL).as_secs_f32();
+
+            if trace_stats_enabled() {
+                info!(
+                    "ALVR latency breakdown: total={:.2}ms game={:.2}ms server_compositor={:.2}ms encoder={:.2}ms transport={:.2}ms decoder={:.2}ms decoder_queue={:.2}ms client_compositor={:.2}ms vsync_queue={:.2}ms client_fps={:.1} server_fps={:.1}",
+                    client_stats.total_pipeline_latency.as_secs_f32() * 1000.0,
+                    game_time_latency.as_secs_f32() * 1000.0,
+                    server_compositor_latency.as_secs_f32() * 1000.0,
+                    encoder_latency.as_secs_f32() * 1000.0,
+                    network_latency.as_secs_f32() * 1000.0,
+                    client_stats.video_decode.as_secs_f32() * 1000.0,
+                    client_stats.video_decoder_queue.as_secs_f32() * 1000.0,
+                    client_stats.rendering.as_secs_f32() * 1000.0,
+                    client_stats.vsync_queue.as_secs_f32() * 1000.0,
+                    client_fps,
+                    server_fps,
+                );
+
+                if let Some(path) = trace_stats_path()
+                    && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
+                {
+                    writeln!(
+                        file,
+                        "total={:.2} game={:.2} server_compositor={:.2} encoder={:.2} transport={:.2} decoder={:.2} decoder_queue={:.2} client_compositor={:.2} vsync_queue={:.2} client_fps={:.1} server_fps={:.1}",
+                        client_stats.total_pipeline_latency.as_secs_f32() * 1000.0,
+                        game_time_latency.as_secs_f32() * 1000.0,
+                        server_compositor_latency.as_secs_f32() * 1000.0,
+                        encoder_latency.as_secs_f32() * 1000.0,
+                        network_latency.as_secs_f32() * 1000.0,
+                        client_stats.video_decode.as_secs_f32() * 1000.0,
+                        client_stats.video_decoder_queue.as_secs_f32() * 1000.0,
+                        client_stats.rendering.as_secs_f32() * 1000.0,
+                        client_stats.vsync_queue.as_secs_f32() * 1000.0,
+                        client_fps,
+                        server_fps,
+                    )
+                    .ok();
+                }
+            }
 
             if self.last_full_report_instant + FULL_REPORT_INTERVAL < Instant::now() {
                 self.last_full_report_instant += FULL_REPORT_INTERVAL;

@@ -135,6 +135,10 @@ pub fn package_client_openxr(
 ) {
     // Validate the source before rebuilding dependencies. Do not rely on a
     // manually copied binary in the directory this command is about to clear.
+    assert!(
+        !matches!(flavor, ReleaseFlavor::GitHub) || spaces_aar.is_some(),
+        "GitHub APK packaging requires --spaces-loader-aar <official 0.23.0 AAR> for VRX support"
+    );
     if let Some(aar) = spaces_aar {
         assert!(
             matches!(flavor, ReleaseFlavor::GitHub),

@@ -455,6 +455,8 @@ impl StatisticsTab {
     }
 
     fn draw_statistics_overview(&self, ui: &mut Ui, statistics: &StatisticsSummary) {
+        let graph = self.history.back().unwrap();
+
         ui.add_space(10.0);
 
         ui.columns(2, |ui| {
@@ -488,6 +490,21 @@ impl StatisticsTab {
 
             ui[0].label(tr("Decoder latency:"));
             ui[1].label(format!("{:.2} ms", statistics.decode_latency_ms));
+
+            ui[0].label(tr("Game render:"));
+            ui[1].label(format!("{:.2} ms", graph.game_time_s * 1000.0));
+
+            ui[0].label(tr("Streamer compositor:"));
+            ui[1].label(format!("{:.2} ms", graph.server_compositor_s * 1000.0));
+
+            ui[0].label(tr("Frame buffering:"));
+            ui[1].label(format!("{:.2} ms", graph.decoder_queue_s * 1000.0));
+
+            ui[0].label(tr("Client compositor:"));
+            ui[1].label(format!("{:.2} ms", graph.client_compositor_s * 1000.0));
+
+            ui[0].label(tr("VSync queue:"));
+            ui[1].label(format!("{:.2} ms", graph.vsync_queue_s * 1000.0));
 
             ui[0].label(tr("Client FPS:"));
             ui[1].label(format!("{} FPS", statistics.client_fps));

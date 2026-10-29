@@ -67,6 +67,17 @@ fn is_streaming(client_hostname: &str) -> bool {
         .is_some_and(|c| c.connection_state == ConnectionState::Streaming)
 }
 
+fn connection_is_live(state: &ConnectionState) -> bool {
+    matches!(
+        state,
+        ConnectionState::Connecting | ConnectionState::Connected | ConnectionState::Streaming
+    )
+}
+
+fn any_connection_active(states: impl IntoIterator<Item = ConnectionState>) -> bool {
+    states.into_iter().any(|state| connection_is_live(&state))
+}
+
 /// Align one center coordinate using the same rule for static and gaze-driven foveation.
 pub fn align_foveation_center_shift(center_shift: f32, edge_size: f32, edge_ratio: f32) -> f32 {
     if !center_shift.is_finite()
@@ -301,6 +312,18 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
     let mut wired_connection = None;
 
     while *lifecycle_state.read() != LifecycleState::ShuttingDown {
+        if any_connection_active(
+            SESSION_MANAGER
+                .read()
+                .client_list()
+                .values()
+                .map(|client| client.connection_state.clone()),
+        ) {
+            dbg_connection!("handshake_loop: Waiting for existing connection");
+            thread::sleep(RETRY_CONNECT_MIN_INTERVAL);
+            continue;
+        }
+
         dbg_connection!("handshake_loop: Try connect to wired device");
 
         let mut wired_client_ips = HashMap::new();
@@ -309,7 +332,7 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
             .client_list()
             .iter()
             .any(|(hostname, info)| {
-                info.connection_state == ConnectionState::Disconnected
+                !connection_is_live(&info.connection_state)
                     && hostname.as_str() == WIRED_CLIENT_HOSTNAME
             })
         {
@@ -376,14 +399,17 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
             wired_client_ips.insert(client_ip, WIRED_CLIENT_HOSTNAME.to_owned());
         }
 
-        if !wired_client_ips.is_empty()
-            && try_connect(
+        if !wired_client_ips.is_empty() {
+            if let Err(e) = try_connect(
                 Arc::clone(&ctx),
                 Arc::clone(&lifecycle_state),
                 wired_client_ips,
-            )
-            .is_ok()
-        {
+            ) {
+                error!("Wired client is ready but the control connection failed: {e}");
+            }
+
+            // A wired target must never silently fall through to mDNS Wi-Fi
+            // discovery. Retry the USB/ADB path until it succeeds.
             thread::sleep(RETRY_CONNECT_MIN_INTERVAL);
             continue;
         }
@@ -398,7 +424,7 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
                     .client_list()
                     .iter()
                     .filter(|(hostname, info)| {
-                        info.connection_state == ConnectionState::Disconnected
+                        !connection_is_live(&info.connection_state)
                             && hostname.as_str() != WIRED_CLIENT_HOSTNAME
                     })
             {
@@ -476,7 +502,7 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
                         .read()
                         .client_list()
                         .get(&client_hostname)
-                        .is_some_and(|c| c.connection_state == ConnectionState::Disconnected)
+                        .is_some_and(|c| !connection_is_live(&c.connection_state))
                     && let Err(e) = try_connect(
                         Arc::clone(&ctx),
                         Arc::clone(&lifecycle_state),
@@ -1522,4 +1548,34 @@ fn connection_pipeline(
     dbg_connection!("connection_pipeline: End");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::any_connection_active;
+    use alvr_common::ConnectionState;
+
+    #[test]
+    fn only_live_clients_block_parallel_handshakes() {
+        assert!(!any_connection_active([]));
+        assert!(!any_connection_active([
+            ConnectionState::Disconnected,
+            ConnectionState::Disconnected,
+        ]));
+        assert!(!any_connection_active([
+            ConnectionState::Disconnected,
+            ConnectionState::Disconnecting,
+        ]));
+
+        for state in [
+            ConnectionState::Connecting,
+            ConnectionState::Connected,
+            ConnectionState::Streaming,
+        ] {
+            assert!(any_connection_active([
+                ConnectionState::Disconnected,
+                state,
+            ]));
+        }
+    }
 }

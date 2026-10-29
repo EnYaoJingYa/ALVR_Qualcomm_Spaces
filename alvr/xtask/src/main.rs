@@ -58,7 +58,7 @@ FLAGS:
     --all-targets       For prepare-deps and build-client-lib subcommand, will build for all android supported ABI targets
     --meta-store        For package-client subcommand, build for Meta Store
     --pico-store        For package-client subcommand, build for Pico Store
-    --spaces            Validate the official Spaces loader before build-client/package-client
+    --spaces            Retained alias; GitHub APK builds always require the Spaces loader
 
 ARGS:
     --spaces-loader-aar <PATH> Official VRMR SDK 0.23.0 UE5.3 libopenxr_loader.aar
@@ -248,9 +248,7 @@ fn main() {
                     if let Some(aar) = spaces_aar.as_deref() {
                         dependencies::prepare_spaces_loader(aar);
                     }
-                    if spaces || spaces_aar.is_some() {
-                        dependencies::validate_spaces_loader();
-                    }
+                    dependencies::validate_spaces_loader();
                     build::build_android_client(profile);
                 }
                 "build-client-lib" => {

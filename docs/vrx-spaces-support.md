@@ -1,6 +1,6 @@
 # ALVR / ThinkReality VRX：修复与原生支持复核
 
-日期：2026-10-27。基线：`dev`，HEAD `95e7ef11` 加本地修改。本文描述源码实现；
+日期：2026-10-27。基线：`dev`，HEAD `e2925295` 加本地修复。本文描述源码实现；
 构建成功不等于设备验收。本轮没有在线 VRX，未安装或启动头显应用。
 
 ## 结论
@@ -106,9 +106,58 @@ Qualcomm 官方 Base Runtime Feature 使用的接口。Touch interaction profile
 ```powershell
 cargo xtask prepare-spaces --spaces-loader-aar build/spaces-sdk-0.23.0/libopenxr_loader.aar
 cargo xtask build-client --release --spaces
-# 依赖清理后重新安装 Loader；分发打包同样要求显式提供源 AAR：
+# build-client 必须已准备正确的 Loader；不再需要 --spaces 才检查。
+# 依赖清理后重新安装 Loader；默认 GitHub 分发打包要求显式提供源 AAR：
 cargo xtask package-client --spaces --spaces-loader-aar build/spaces-sdk-0.23.0/libopenxr_loader.aar
+# 在现有安装目录内重建桌面 Streamer 时保留用户 session.json：
+cargo xtask build-streamer --keep-config
 ```
+
+GitHub 的 APK 构建和发布工作流通过仓库 Secret `SPACES_LOADER_AAR_URL` 获取
+上述官方源 AAR。该值应是构建机可访问的授权 HTTPS 下载地址；下载后先校验固定
+AAR 哈希，xtask 再校验 JNI ARM64 库。Qualcomm SDK 下载要求登录，不使用匿名
+登录页或其他版本替代，也不把源 AAR 提交到仓库。Secret 缺失、下载失败或哈希
+不符都会阻止 APK 产出；来自 fork 的 PR 默认没有此 Secret，需由维护者在可信
+分支执行产物构建。Rust Android 检查工作流只运行 `cargo apk check`，不生成缺库 APK。
+
+2026-10-27 复核修复：关闭自动启动期间即使仍观察到 VRX 进程，也不消耗下次启动
+机会。VSync 输入线程保留已消费序号，渲染通知早于等待也能处理；测试用超时接收
+并清理线程，不再依赖 10 ms 睡眠和无限等待。
+
+VRX 的有线串流帧提交使用 `xrWaitFrame` 返回的单调递增
+`predictedDisplayTime` 作为 `xrEndFrame::displayTime`。此前传入可能重复的视频
+时间戳会被高通合成器判定为 `Duplicate display time`，随后出现
+`Too many frames are queued` 和明显卡顿。该规则来自 OpenXR 1.0 规范
+“Frame Submission”和“xrWaitFrame”定义；Quest/Pico 既有提交时间逻辑不受影响。
+
+有线连接也必须保持严格。此前 ADB loopback 控制连接短暂失败后，服务端会继续
+执行 mDNS 发现并可能改连 Wi-Fi；现在只要 `client.wired` 已就绪，失败就记录错误并
+重试 USB/ADB 路径，不再静默切换网络。不要把 `client.wired / 127.0.0.1` 与
+`*.client.local. / 192.168.x.x` 混为同一条链路。
+
+VRX 还显式请求公开扩展 `XR_QCOM_tracking_optimization_settings` 的
+`DOMAIN_ALL + HIGH_POWER_PRIORIZATION`，以降低头部/控制器跟踪延迟；扩展缺失或
+调用失败会直接报错。
+
+### 35–40 ms 延迟边界
+
+当前 Qualcomm Spaces OpenXR 路径不能把端到端总延迟压到 35–40 ms。实测
+`vsync_queue` 单独约 `35.6 ms`，还未计入游戏时间、编码、USB/ADB、解码、解码缓冲
+和客户端合成。Runtime 枚举的 QCOM 扩展中没有 VSync 队列或 late-latch 深度控制。
+
+逆向当前 `VrStreamSpace.apk` 后确认：
+
+- 当前应用使用 OpenXR；`libInterceptOpenXR.so` 只转发
+  `xrWaitFrame/xrBeginFrame/xrEndFrame` 并插入本图层，没有修改显示时间。
+- APK 中遗留的 `GSXRSetVSyncCount` 是旧 GSXR 路径；当前 APK 不包含
+  `libgsxrplugin.so`，不能视为可调用接口。
+- 公开 OpenXR 扩展只有 `XR_QCOM_tracking_optimization_settings` 可用于跟踪
+  优化，没有公开的低延迟合成器队列控制。
+
+因此，在不 root、不打包厂商私有库的前提下，35–40 ms 目标需要更换帧提交后端
+（例如取得 Qualcomm/Lenovo 正式授权的原生 QVR/GSXR 或 Vulkan late-latching 接口），
+仅修改 ALVR 参数无法达到这一下限。ALVR 侧仍应保持：NVENC P1/UltraLowLatency、
+关闭多遍和 AQ、严格有线连接、有限解码缓冲，以及高性能跟踪提示。
 
 | 依赖 | SHA-256 |
 | --- | --- |
@@ -131,11 +180,82 @@ OpenXR API 1.0.34 是设备 API 基线。这三个版本号含义不同，不做
 
 ## 验证记录
 
+本轮本地修复（基于 `e2925295`，尚未提交）：
+
+- 最新的 client_openxr 10 项宿主机测试通过；server_core 编译及测试目标通过。
+  新增自动启动关闭期间观察进程、VSync 提前通知、VRX 显示时间和扩展集回归测试。
+- 新版 xtask 编译通过；缺少源 AAR、错误源 AAR、缺少 Spaces Loader 三项构建拒绝
+  检查通过，失败前后现有 Loader 与 APK 的 SHA-256 保持一致。
+- ARM64 Release APK 编译和 v3 签名验证通过，两种 Loader 的 SHA-256 与固定依赖
+  一致；产物 `build/alvr_client_android/alvr_client_android.apk`，SHA-256 为
+  `2A7C2FA46DA8E536AB27B539F4175747858BB6E4841084C71F7DBD9D97CB09DF`。
+- CI 下载动作的缺少地址、正确 AAR、错误 AAR 三项本地模拟检查通过；
+  YAML 和 Bash 语法检查通过。未配置远端 Secret，也未运行 GitHub Actions。
+- 修复版已安装并启动在 `PS0012P0`；PC 显示 `Streaming`，SurfaceFlinger 报告
+  90 FPS。观察期间 `Duplicate display time`、`Too many frames are queued` 和
+  `xrEndFrame` 错误均为 0；主观画面流畅度与长时间稳定性仍需用户体验确认。
+- 有线会话曾实际落到 `8801.client.local. / 192.168.1.7`（Wi-Fi），而
+  `client.wired / 127.0.0.1` 断开。禁止静默回退后，只有 wired loopback 建立
+  Streaming，Wi-Fi 客户端保持 Disconnected。
+
+`e2925295` 提交的验证记录：
+
 - 14 项宿主机测试通过：client_openxr 8、client_core 2、system_info 3、ADB 1；
   包含配置拒绝/外部眼动允许、初始化错误唤醒、USB 自动启动机会和设备识别。
 - ARM64 Release APK 和 Windows Release Streamer/Dashboard 编译通过。
 - APK 签名、库清单和两种 Loader 的 SHA-256 检查通过；错误来源 AAR 被准备命令拒绝。
 - PC 构建前后 `session.json` SHA-256 相同。
-- 本次修复保留本地 Git 提交；未推送。本轮没有在线 VRX，未做实机验收。
+- 该轮修复已保留本地 Git 提交；未推送，当时没有在线 VRX，未做实机验收。
 - 源码中仍有待完善项：10-bit/High Profile 能力按平台静态声明；裸手与佩戴检测
   没有接入；颜色与逐帧输入改动缺少当前设备测量。这些不属于“已全部原生支持”。
+
+### 2026-10-29 黑屏与有线重连修复
+
+- VRX 分支将解码轮询截止时间设为“不等待”，但渲染循环只在截止时间存在时才调用
+  `get_frame()`，导致解码队列完全不被消费。现改为所有平台每帧至少执行一次
+  非阻塞取帧；VRX 不额外等待，其他平台仍按原截止时间补轮询。
+- VRX Runtime 可能在头显已经佩戴时持续报告 `UserPresence=false`。VRX 现在忽略
+  该错误事件以保持 SteamVR HMD active；Pico、Quest 等平台保持原行为。
+- 有线客户端已有活动会话时，握手线程不再并行尝试残留 mDNS/Wi-Fi 客户端。
+- `alvr_client_openxr` 12 项宿主机测试通过，Release APK 和 Windows Streamer
+  构建通过。实机有线会话达到 `Streaming`，Dashboard 显示约 89 Client FPS、
+  590 packets/s，VRX 截屏已恢复双眼 SteamVR 画面。
+- 本次 APK SHA-256：`4DEB07A02791DB5144F0472690CB1BA8967575CEBA158115DDC0C0B570E4D584`。
+
+### 2026-10-29 有线高延迟与重复编码修复
+
+用户截图中的 35 Mbps 配置对应约 256 Mbps 实际视频吞吐，且 Streamer 显示
+603 FPS、Client 显示 89 FPS。根因是 Windows SteamVR 驱动的重复 `Present`
+路径把同一 tracking timestamp 再次送进 NVENC。每帧在 2144×2144、低延迟
+H.264 下存在实际最低帧大小，因此重复编码把传输量推高到配置值数倍，并造成
+约 28 ms 的 USB/ADB 传输段。
+
+Windows 驱动现在记录最后一次成功提交的非零 target timestamp，并跳过其重复
+`Present`；零时间戳仍允许重试。修复后同一 35 Mbps 会话的 Dashboard 实测
+码率约 34.3 Mbps。新增直接统计项用于显示游戏渲染、Streamer 合成、帧缓冲、
+客户端合成和 VSync 队列，并修正多 NAL 帧的总字节统计和重复 Present 的
+Streamer FPS 统计。
+
+一次 600 帧统计窗口的平均分段如下（2.0 帧缓冲）：
+
+| 分段 | 平均 | 范围 |
+| --- | ---: | ---: |
+| 总延迟 | 61.23 ms | 48.01–70.88 ms |
+| 游戏渲染 | 1.65 ms | 0.71–3.75 ms |
+| Streamer 合成 | 0.20 ms | 0.12–2.43 ms |
+| 编码 | 2.47 ms | 1.37–3.86 ms |
+| USB/ADB 传输 | 3.82 ms | 1.67–15.15 ms |
+| 解码 | 3.82 ms | 1.88–9.88 ms |
+| 帧缓冲 | 11.35 ms | 0.11–23.49 ms |
+| 客户端合成 | 2.55 ms | 1.04–5.71 ms |
+| VSync 队列 | 35.38 ms | 31.94–37.32 ms |
+
+瓶颈已经不在编码、USB 或解码，而是 Qualcomm Spaces/OpenXR 客户端的
+VSync 提交队列。1.0 帧缓冲测试进一步把平均总延迟降到约 55.7 ms、帧缓冲
+降到 6.3 ms，但帧率波动更明显；1.5 帧缓冲平均总延迟约 58.5 ms、帧缓冲约
+8.5 ms、客户端平均约 88 FPS，已作为最终折中保留。若目标仍是 35–40 ms，
+剩余约 35 ms 的 VSync 队列需要正式授权的原生 late-latching/低延迟合成接口，
+单纯降低 ALVR 码率或更换 USB 线不能消除。
+
+同时修正 `Disconnecting` 状态的恢复：该状态不再被当作永久活动连接，也不再
+阻止有线握手；新的有线连接可从残留 `Disconnecting` 状态恢复为 `Streaming`。

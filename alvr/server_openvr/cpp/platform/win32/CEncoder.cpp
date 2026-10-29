@@ -18,6 +18,7 @@ void CEncoder::Initialize(std::shared_ptr<CD3DRender> d3dRender) {
     m_FrameRender->Startup();
     uint32_t encoderWidth, encoderHeight;
     m_FrameRender->GetEncodingResolution(&encoderWidth, &encoderHeight);
+    m_videoEncoder.reset();
 
     Exception vplException;
     Exception vceException;
@@ -40,25 +41,30 @@ void CEncoder::Initialize(std::shared_ptr<CD3DRender> d3dRender) {
 
     try {
         Debug("Try to use VideoEncoderAMF.\n");
-        m_videoEncoder = std::make_shared<VideoEncoderAMF>(d3dRender, encoderWidth, encoderHeight);
-        m_videoEncoder->Initialize();
+        auto encoder
+            = std::make_shared<VideoEncoderAMF>(d3dRender, encoderWidth, encoderHeight);
+        encoder->Initialize();
+        m_videoEncoder = encoder;
         return;
     } catch (Exception e) {
         vceException = e;
     }
     try {
         Debug("Try to use VideoEncoderNVENC.\n");
-        m_videoEncoder
+        auto encoder
             = std::make_shared<VideoEncoderNVENC>(d3dRender, encoderWidth, encoderHeight);
-        m_videoEncoder->Initialize();
+        encoder->Initialize();
+        m_videoEncoder = encoder;
         return;
     } catch (Exception e) {
         nvencException = e;
     }
     try {
         Debug("Try to use VideoEncoderVPL.\n");
-        m_videoEncoder = std::make_shared<VideoEncoderVPL>(d3dRender, encoderWidth, encoderHeight);
-        m_videoEncoder->Initialize();
+        auto encoder
+            = std::make_shared<VideoEncoderVPL>(d3dRender, encoderWidth, encoderHeight);
+        encoder->Initialize();
+        m_videoEncoder = encoder;
         return;
     } catch (Exception e) {
         vplException = e;
@@ -66,8 +72,10 @@ void CEncoder::Initialize(std::shared_ptr<CD3DRender> d3dRender) {
 #ifdef ALVR_GPL
     try {
         Debug("Try to use VideoEncoderSW.\n");
-        m_videoEncoder = std::make_shared<VideoEncoderSW>(d3dRender, encoderWidth, encoderHeight);
-        m_videoEncoder->Initialize();
+        auto encoder
+            = std::make_shared<VideoEncoderSW>(d3dRender, encoderWidth, encoderHeight);
+        encoder->Initialize();
+        m_videoEncoder = encoder;
         return;
     } catch (Exception e) {
         swException = e;
