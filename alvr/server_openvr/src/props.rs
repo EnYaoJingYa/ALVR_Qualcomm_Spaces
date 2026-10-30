@@ -124,6 +124,7 @@ fn serial_number(device_id: u64) -> String {
             HeadsetEmulationMode::Quest1 => "1PASH0X0X00000".into(),
             HeadsetEmulationMode::Quest2 => "1WMHH000X00000".into(),
             HeadsetEmulationMode::QuestPro => "230YC0XXXX00XX".into(),
+            HeadsetEmulationMode::ThinkRealityVRX => "ALVRVRX0000001".into(),
             HeadsetEmulationMode::Pico4 => "VRLINKHMDPICO4".into(),
             HeadsetEmulationMode::Vive => "HTCVive-001".into(),
             HeadsetEmulationMode::Custom { serial_number, .. } => serial_number.clone(),
@@ -135,6 +136,7 @@ fn serial_number(device_id: u64) -> String {
                 ControllersEmulationMode::Quest2Touch => "1WMHH000X00000_Controller",
                 ControllersEmulationMode::Quest3Plus => "2G0YXX0X0000XX_Controller", // 2G0YY Left 2G0YZ Right
                 ControllersEmulationMode::QuestPro => "230YXXXXXXXXXX_Controller", // 230YT left, 230YV right
+                ControllersEmulationMode::ThinkRealityVRX => "ALVRVRX_CONTROLLER",
                 ControllersEmulationMode::RiftSTouch
                 | ControllersEmulationMode::Pico4
                 | ControllersEmulationMode::PSVR2Sense
@@ -306,6 +308,14 @@ pub extern "C" fn set_device_openvr_props(instance_ptr: *mut c_void, device_id: 
                 set_prop(DriverVersionString, "1.55.0");
                 set_oculus_common_headset_props();
             }
+            HeadsetEmulationMode::ThinkRealityVRX => {
+                set_prop(TrackingSystemNameString, "ThinkReality");
+                set_prop(ModelNumberString, "ThinkReality VRX");
+                set_prop(ManufacturerNameString, "Lenovo");
+                set_prop(RenderModelNameString, "generic_hmd");
+                set_prop(RegisteredDeviceTypeString, "alvr/ThinkRealityVRX_HMD");
+                set_prop(DriverVersionString, "");
+            }
             HeadsetEmulationMode::Pico4 => {
                 set_prop(TrackingSystemNameString, "vrlink");
                 set_prop(ModelNumberString, "PICO 4");
@@ -444,6 +454,39 @@ pub extern "C" fn set_device_openvr_props(instance_ptr: *mut c_void, device_id: 
                         set_prop(RenderModelNameString, "oculus_quest_pro_controller_right");
                     }
                     set_oculus_common_props();
+                }
+                ControllersEmulationMode::ThinkRealityVRX => {
+                    set_prop(TrackingSystemNameString, "ThinkReality");
+                    set_prop(ManufacturerNameString, "Lenovo");
+                    set_prop(
+                        ModelNumberString,
+                        if left_hand {
+                            "ThinkReality VRX (Left Controller)"
+                        } else {
+                            "ThinkReality VRX (Right Controller)"
+                        },
+                    );
+                    set_prop(ControllerTypeString, "alvr_vrx_controller");
+                    set_prop(
+                        RenderModelNameString,
+                        if left_hand {
+                            "{alvr_server}/rendermodels/alvr_vrx_controller_left"
+                        } else {
+                            "{alvr_server}/rendermodels/alvr_vrx_controller_right"
+                        },
+                    );
+                    set_prop(
+                        InputProfilePathString,
+                        "{alvr_server}/input/alvr_vrx_controller_profile.json",
+                    );
+                    set_prop(
+                        RegisteredDeviceTypeString,
+                        if left_hand {
+                            "alvr_vrx_controller/left"
+                        } else {
+                            "alvr_vrx_controller/right"
+                        },
+                    );
                 }
                 ControllersEmulationMode::Pico4 => {
                     set_prop(TrackingSystemNameString, "vrlink");

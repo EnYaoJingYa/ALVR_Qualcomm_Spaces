@@ -279,8 +279,20 @@ impl ClientCoreContext {
     pub fn report_fatal_decoder_error(&self, error: &str) {
         error!("Fatal decoder error, restarting connection: {error}");
 
+        if self.platform == Platform::ThinkRealityVRX {
+            self.connection_context
+                .fatal_decoder_error
+                .lock()
+                .get_or_insert_with(|| error.to_owned());
+        }
+
         // The connection loop observes changes on this value
         *self.connection_context.state.write() = ConnectionState::Disconnecting;
+    }
+
+    /// The OpenXR owner performs bounded recovery after a VRX decoder runtime failure.
+    pub fn take_fatal_decoder_error(&self) -> Option<String> {
+        self.connection_context.fatal_decoder_error.lock().take()
     }
 
     /// Returns metadata matching this decoded frame, if available.

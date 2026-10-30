@@ -63,9 +63,9 @@ impl StagingRenderer {
         staging_textures: [gl::Texture; 2],
         view_resolution: UVec2,
         fix_limited_range: bool,
-    ) -> Self {
+    ) -> Result<Self, String> {
+        context.make_current()?;
         let gl = &context.gl_context;
-        context.make_current();
 
         // Add #defines into the shader after the first line
         let mut frag_lines: Vec<&str> = include_str!("../resources/staging_fragment.glsl")
@@ -105,21 +105,21 @@ impl StagingRenderer {
 
             let view_idx_uloc = ck!(gl.get_uniform_location(program, "view_idx")).unwrap();
 
-            Self {
+            Ok(Self {
                 context,
                 program,
                 surface_texture,
                 view_idx_uloc,
                 framebuffers: framebuffers.try_into().unwrap(),
                 viewport_size: view_resolution.as_ivec2(),
-            }
+            })
         }
     }
 
     #[allow(unused_variables)]
-    pub fn render(&self, hardware_buffer: *mut c_void) {
+    pub fn render(&self, hardware_buffer: *mut c_void) -> Result<(), String> {
+        self.context.make_current()?;
         let gl = &self.context.gl_context;
-        self.context.make_current();
 
         unsafe {
             self.context.render_ahardwarebuffer_using_texture(
@@ -144,13 +144,17 @@ impl StagingRenderer {
                 },
             )
         };
+        Ok(())
     }
 }
 
 impl Drop for StagingRenderer {
     fn drop(&mut self) {
         let gl = &self.context.gl_context;
-        self.context.make_current();
+        if let Err(error) = self.context.make_current() {
+            alvr_common::error!("Cannot delete staging resources without context: {error}");
+            return;
+        }
 
         unsafe {
             ck!(gl.delete_program(self.program));

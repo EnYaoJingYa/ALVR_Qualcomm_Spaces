@@ -9,6 +9,7 @@ license.workspace = true
 crate-type = ["rlib", "staticlib", "cdylib"]
 
 [features]
+vrx-fault-injection = []
 link-stdcpp-shared = []
 default = ["link-stdcpp-shared"]
 

@@ -256,6 +256,7 @@ dependencies = [
 name = "alvr_client_openxr"
 version = "21.0.0-dev14"
 dependencies = [
+ "ab_glyph",
  "alvr_client_core",
  "alvr_common",
  "alvr_graphics",
@@ -265,6 +266,7 @@ dependencies = [
  "android-activity",
  "jni 0.22.4",
  "libc",
+ "ndk",
  "ndk-context",
  "openxr",
 ]
@@ -402,6 +404,7 @@ dependencies = [
  "alvr_server_io",
  "alvr_session",
  "alvr_sockets",
+ "alvr_system_info",
  "ash",
  "axum",
  "chrono",

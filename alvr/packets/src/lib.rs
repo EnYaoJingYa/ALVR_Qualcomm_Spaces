@@ -28,7 +28,7 @@ pub const STATISTICS: u16 = 4;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct VideoStreamingCapabilitiesExt {
-    // Nothing for now
+    // Reserved for backwards-compatible capability extensions.
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -56,10 +56,7 @@ impl VideoStreamingCapabilities {
     }
 
     pub fn ext(&self) -> Result<VideoStreamingCapabilitiesExt> {
-        let _ext_json = json::from_str::<json::Value>(&self.ext_str)?;
-
-        // decode values here
-
+        let _ = json::from_str::<json::Value>(&self.ext_str)?;
         Ok(VideoStreamingCapabilitiesExt {})
     }
 }

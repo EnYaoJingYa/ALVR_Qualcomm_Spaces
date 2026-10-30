@@ -154,22 +154,58 @@ bool FrameRender::Startup() {
 
     m_pD3DRender->GetDevice()->CreateDepthStencilState(&depthStencilDesc, &m_depthStencilState);
 
-    // Left eye viewport
+    // VRX exposes a 2280x2280 visible image per eye, while H.264/HEVC use
+    // 2304x2304 macroblock-aligned surfaces. Center the visible image in each
+    // encoded eye surface so the client can remove exactly 12 pixels per edge.
+    // Other devices keep the historical full-surface composition path.
+    const bool centerComposition = Settings_Instance()->m_centerComposition;
+    const uint32_t renderEyeWidth = Settings_Instance()->m_renderWidth / 2;
+    const uint32_t targetEyeWidth
+        = Settings_Instance()->m_recommendedTargetWidth > 0
+        ? (uint32_t)Settings_Instance()->m_recommendedTargetWidth / 2
+        : renderEyeWidth;
+    const uint32_t targetHeight = Settings_Instance()->m_recommendedTargetHeight > 0
+        ? (uint32_t)Settings_Instance()->m_recommendedTargetHeight
+        : Settings_Instance()->m_renderHeight;
+    const bool useCenteredViewport = centerComposition && targetEyeWidth <= renderEyeWidth
+        && targetHeight <= Settings_Instance()->m_renderHeight;
+    const uint32_t viewportWidth = useCenteredViewport ? targetEyeWidth : renderEyeWidth;
+    const uint32_t viewportHeight
+        = useCenteredViewport ? targetHeight : Settings_Instance()->m_renderHeight;
+    const uint32_t viewportOffsetX = useCenteredViewport
+        ? (renderEyeWidth - targetEyeWidth) / 2
+        : 0;
+    const uint32_t viewportOffsetY = useCenteredViewport
+        ? (Settings_Instance()->m_renderHeight - targetHeight) / 2
+        : 0;
 
-    m_viewportL.Width = (float)Settings_Instance()->m_renderWidth / 2.0;
-    m_viewportL.Height = (float)Settings_Instance()->m_renderHeight;
+    if (centerComposition
+        && (viewportWidth != targetEyeWidth || viewportHeight != targetHeight)) {
+        Warn(
+            "VRX centered composition cannot fit target %ux%u in render surface %ux%u; using "
+            "full surface",
+            targetEyeWidth,
+            targetHeight,
+            renderEyeWidth,
+            Settings_Instance()->m_renderHeight
+        );
+    }
+
+    // Left eye viewport
+    m_viewportL.Width = (float)viewportWidth;
+    m_viewportL.Height = (float)viewportHeight;
     m_viewportL.MinDepth = 0.0f;
     m_viewportL.MaxDepth = 1.0f;
-    m_viewportL.TopLeftX = 0;
-    m_viewportL.TopLeftY = 0;
+    m_viewportL.TopLeftX = (float)viewportOffsetX;
+    m_viewportL.TopLeftY = (float)viewportOffsetY;
 
     // Right eye viewport
-    m_viewportR.Width = (float)Settings_Instance()->m_renderWidth / 2.0;
-    m_viewportR.Height = (float)Settings_Instance()->m_renderHeight;
+    m_viewportR.Width = (float)viewportWidth;
+    m_viewportR.Height = (float)viewportHeight;
     m_viewportR.MinDepth = 0.0f;
     m_viewportR.MaxDepth = 1.0f;
-    m_viewportR.TopLeftX = (float)Settings_Instance()->m_renderWidth / 2.0;
-    m_viewportR.TopLeftY = 0;
+    m_viewportR.TopLeftX = (float)(renderEyeWidth + viewportOffsetX);
+    m_viewportR.TopLeftY = (float)viewportOffsetY;
 
     // Final composition viewport
     m_viewport.Width = (float)Settings_Instance()->m_renderWidth;
@@ -180,22 +216,22 @@ bool FrameRender::Startup() {
     m_viewport.TopLeftY = 0;
 
     // Left eye scissor
-    m_scissorL.bottom = 0.0f;
-    m_scissorL.left = 0.0f;
-    m_scissorL.right = (float)Settings_Instance()->m_renderWidth / 2.0f;
-    m_scissorL.top = (float)Settings_Instance()->m_renderHeight;
+    m_scissorL.top = (LONG)viewportOffsetY;
+    m_scissorL.left = (LONG)viewportOffsetX;
+    m_scissorL.right = (LONG)(viewportOffsetX + viewportWidth);
+    m_scissorL.bottom = (LONG)(viewportOffsetY + viewportHeight);
 
     // Right eye scissor
-    m_scissorR.bottom = 0.0f;
-    m_scissorR.left = (float)Settings_Instance()->m_renderWidth / 2.0f;
-    m_scissorR.right = (float)Settings_Instance()->m_renderWidth;
-    m_scissorR.top = (float)Settings_Instance()->m_renderHeight;
+    m_scissorR.top = (LONG)viewportOffsetY;
+    m_scissorR.left = (LONG)(renderEyeWidth + viewportOffsetX);
+    m_scissorR.right = (LONG)(renderEyeWidth + viewportOffsetX + viewportWidth);
+    m_scissorR.bottom = (LONG)(viewportOffsetY + viewportHeight);
 
     // Final composition scissor
-    m_scissor.bottom = 0.0f;
+    m_scissor.top = 0;
     m_scissor.left = 0.0f;
     m_scissor.right = (float)Settings_Instance()->m_renderWidth;
-    m_scissor.top = (float)Settings_Instance()->m_renderHeight;
+    m_scissor.bottom = (LONG)Settings_Instance()->m_renderHeight;
 
     //
     // Compile shaders
@@ -569,7 +605,7 @@ bool FrameRender::RenderFrame(
 
     // Clear the back buffer
     m_pD3DRender->GetContext()->ClearRenderTargetView(
-        m_pRenderTargetView.Get(), DirectX::Colors::MidnightBlue
+        m_pRenderTargetView.Get(), Settings_Instance()->m_centerComposition ? DirectX::Colors::Black : DirectX::Colors::MidnightBlue
     );
 
     // Overlay recentering texture on top of all layers.

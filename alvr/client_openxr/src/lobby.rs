@@ -1,4 +1,5 @@
 use crate::{
+    StageFailure,
     graphics::{self, ProjectionLayerAlphaConfig, ProjectionLayerBuilder},
     interaction::{self, InteractionContext},
 };
@@ -28,7 +29,7 @@ impl Lobby {
         platform: Platform,
         view_resolution: UVec2,
         initial_hud_message: &str,
-    ) -> Self {
+    ) -> Result<Self, StageFailure> {
         let reference_space_type = if xr_session.instance().exts().ext_local_floor.is_some() {
             xr::ReferenceSpaceType::LOCAL_FLOOR_EXT
         } else {
@@ -37,34 +38,69 @@ impl Lobby {
             xr::ReferenceSpaceType::STAGE
         };
 
-        let reference_space = interaction::get_reference_space(&xr_session, reference_space_type);
+        let reference_space = interaction::get_reference_space(&xr_session, reference_space_type)
+            .map_err(|error| {
+            StageFailure::from_error(
+                "lobby_reference_space_create",
+                error,
+                true,
+                "destroy_session_and_retry_with_backoff",
+                "instance,session,interaction_context",
+            )
+        })?;
 
         let swapchains = [
-            graphics::create_swapchain(&xr_session, &gfx_ctx, view_resolution, SDR_FORMAT_GL, None),
-            graphics::create_swapchain(&xr_session, &gfx_ctx, view_resolution, SDR_FORMAT_GL, None),
+            graphics::create_swapchain(&xr_session, &gfx_ctx, view_resolution, SDR_FORMAT_GL, None)
+                .map_err(|error| {
+                    StageFailure::from_error(
+                        "lobby_swapchain_create",
+                        error,
+                        true,
+                        "destroy_swapchains_and_retry_with_backoff",
+                        "instance,session,interaction_context,reference_space,left_swapchain",
+                    )
+                })?,
+            graphics::create_swapchain(&xr_session, &gfx_ctx, view_resolution, SDR_FORMAT_GL, None)
+                .map_err(|error| {
+                    StageFailure::from_error(
+                        "lobby_swapchain_create",
+                        error,
+                        true,
+                        "destroy_swapchains_and_retry_with_backoff",
+                        "instance,session,interaction_context,reference_space,left_swapchain",
+                    )
+                })?,
         ];
 
+        let left_images = swapchains[0].enumerate_images().map_err(|error| {
+            StageFailure::from_error(
+                "lobby_swapchain_images",
+                error,
+                true,
+                "destroy_swapchains_and_retry_with_backoff",
+                "instance,session,interaction_context,reference_space,swapchains",
+            )
+        })?;
+        let right_images = swapchains[1].enumerate_images().map_err(|error| {
+            StageFailure::from_error(
+                "lobby_swapchain_images",
+                error,
+                true,
+                "destroy_swapchains_and_retry_with_backoff",
+                "instance,session,interaction_context,reference_space,swapchains",
+            )
+        })?;
         let renderer = LobbyRenderer::new(
             gfx_ctx,
             view_resolution,
             [
-                swapchains[0]
-                    .enumerate_images()
-                    .unwrap()
-                    .iter()
-                    .map(|i| *i as _)
-                    .collect(),
-                swapchains[1]
-                    .enumerate_images()
-                    .unwrap()
-                    .iter()
-                    .map(|i| *i as _)
-                    .collect(),
+                left_images.iter().map(|i| *i as _).collect(),
+                right_images.iter().map(|i| *i as _).collect(),
             ],
             initial_hud_message,
         );
 
-        Self {
+        Ok(Self {
             xr_session,
             interaction_ctx,
             platform,
@@ -73,19 +109,33 @@ impl Lobby {
             view_resolution,
             reference_space_type,
             renderer,
-        }
+        })
     }
 
-    pub fn update_reference_space(&mut self) {
+    pub fn update_reference_space(&mut self) -> Result<(), StageFailure> {
         self.reference_space =
-            interaction::get_reference_space(&self.xr_session, self.reference_space_type);
+            interaction::get_reference_space(&self.xr_session, self.reference_space_type).map_err(
+                |error| {
+                    StageFailure::from_error(
+                        "lobby_reference_space_update",
+                        error,
+                        true,
+                        "reconnect_session",
+                        "instance,session,lobby_swapchains",
+                    )
+                },
+            )?;
+        Ok(())
     }
 
     pub fn update_hud_message(&self, message: &str) {
         self.renderer.update_hud_message(message);
     }
 
-    pub fn render(&mut self, vsync_time: Duration) -> ProjectionLayerBuilder<'_> {
+    pub fn render(
+        &mut self,
+        vsync_time: Duration,
+    ) -> Result<ProjectionLayerBuilder<'_>, StageFailure> {
         let xr_vsync_time = crate::to_xr_time(vsync_time);
 
         let (flags, maybe_views) = self
@@ -95,7 +145,15 @@ impl Lobby {
                 xr_vsync_time,
                 &self.reference_space,
             )
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "lobby_locate_views",
+                    error,
+                    true,
+                    "reconnect_session",
+                    "instance,session,lobby_swapchains",
+                )
+            })?;
 
         let views = if flags.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
             maybe_views
@@ -148,15 +206,47 @@ impl Lobby {
                 interaction::get_body_skeleton(source, &self.reference_space, vsync_time)
             });
 
-        let left_swapchain_idx = self.swapchains[0].acquire_image().unwrap();
-        let right_swapchain_idx = self.swapchains[1].acquire_image().unwrap();
+        let left_swapchain_idx = self.swapchains[0].acquire_image().map_err(|error| {
+            StageFailure::from_error(
+                "lobby_swapchain_acquire",
+                error,
+                true,
+                "reconnect_session",
+                "instance,session,lobby_swapchains",
+            )
+        })?;
+        let right_swapchain_idx = self.swapchains[1].acquire_image().map_err(|error| {
+            StageFailure::from_error(
+                "lobby_swapchain_acquire",
+                error,
+                true,
+                "reconnect_session",
+                "instance,session,lobby_swapchains",
+            )
+        })?;
 
         self.swapchains[0]
             .wait_image(xr::Duration::INFINITE)
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "lobby_swapchain_wait",
+                    error,
+                    true,
+                    "reconnect_session",
+                    "instance,session,lobby_swapchains",
+                )
+            })?;
         self.swapchains[1]
             .wait_image(xr::Duration::INFINITE)
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "lobby_swapchain_wait",
+                    error,
+                    true,
+                    "reconnect_session",
+                    "instance,session,lobby_swapchains",
+                )
+            })?;
 
         self.renderer.render(
             [
@@ -182,8 +272,24 @@ impl Lobby {
             cfg!(debug_assertions),
         );
 
-        self.swapchains[0].release_image().unwrap();
-        self.swapchains[1].release_image().unwrap();
+        self.swapchains[0].release_image().map_err(|error| {
+            StageFailure::from_error(
+                "lobby_swapchain_release",
+                error,
+                true,
+                "reconnect_session",
+                "instance,session,lobby_swapchains",
+            )
+        })?;
+        self.swapchains[1].release_image().map_err(|error| {
+            StageFailure::from_error(
+                "lobby_swapchain_release",
+                error,
+                true,
+                "reconnect_session",
+                "instance,session,lobby_swapchains",
+            )
+        })?;
 
         let rect = xr::Rect2Di {
             offset: xr::Offset2Di { x: 0, y: 0 },
@@ -193,7 +299,7 @@ impl Lobby {
             },
         };
 
-        ProjectionLayerBuilder::new(
+        Ok(ProjectionLayerBuilder::new(
             &self.reference_space,
             [
                 xr::CompositionLayerProjectionView::new()
@@ -219,6 +325,6 @@ impl Lobby {
                 premultiplied: true,
             }),
             None,
-        )
+        ))
     }
 }

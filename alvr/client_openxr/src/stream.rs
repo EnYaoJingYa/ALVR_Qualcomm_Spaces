@@ -1,4 +1,5 @@
 use crate::{
+    StageFailure,
     graphics::{self, ProjectionLayerAlphaConfig, ProjectionLayerBuilder},
     interaction::{self, InteractionContext, InteractionSourcesConfig},
 };
@@ -18,7 +19,7 @@ use alvr_graphics::{GraphicsContext, StreamRenderer, StreamViewParams};
 use alvr_packets::{ClientStreamConfig, RealTimeConfig, TrackingData};
 use alvr_session::{
     ClientsideFoveationConfig, ClientsideFoveationMode, ClientsidePostProcessingConfig, CodecType,
-    MediacodecProperty, PassthroughMode, UpscalingConfig,
+    MediacodecProperty, PassthroughMode, UpscalingConfig, VrxGraphicsBackend,
 };
 use alvr_system_info::Platform;
 use openxr as xr;
@@ -31,6 +32,7 @@ use std::{
 };
 
 const DECODER_MAX_TIMEOUT_MULTIPLIER: f32 = 0.8;
+use alvr_system_info::{VRX_ENCODED_EYE_RESOLUTION, VRX_VISIBLE_EYE_RESOLUTION};
 
 pub struct ParsedStreamConfig {
     pub view_resolution: UVec2,
@@ -43,6 +45,7 @@ pub struct ParsedStreamConfig {
     pub clientside_post_processing: Option<ClientsidePostProcessingConfig>,
     pub upscaling: Option<UpscalingConfig>,
     pub force_software_decoder: bool,
+    pub vrx_graphics_backend: VrxGraphicsBackend,
     pub max_buffering_frames: f32,
     pub buffering_history_weight: f32,
     pub decoder_options: Vec<(String, MediacodecProperty)>,
@@ -50,6 +53,10 @@ pub struct ParsedStreamConfig {
 }
 
 impl ParsedStreamConfig {
+    fn encoded_view_resolution(&self) -> UVec2 {
+        encoded_view_resolution(self.view_resolution, self.foveated_encoding_config.as_ref())
+    }
+
     pub fn new(config: &ClientStreamConfig) -> Self {
         Self {
             view_resolution: config.negotiated_config.view_resolution,
@@ -72,6 +79,7 @@ impl ParsedStreamConfig {
                 .cloned(),
             upscaling: config.settings.video.upscaling.as_option().cloned(),
             force_software_decoder: config.settings.video.force_software_decoder,
+            vrx_graphics_backend: config.settings.video.vrx_graphics_backend,
             max_buffering_frames: config.settings.video.max_buffering_frames,
             buffering_history_weight: config.settings.video.buffering_history_weight,
             decoder_options: config.settings.video.mediacodec_extra_options.clone(),
@@ -104,17 +112,65 @@ impl StreamContext {
         gfx_ctx: Rc<GraphicsContext>,
         interaction_ctx: Arc<RwLock<InteractionContext>>,
         config: ParsedStreamConfig,
-    ) -> StreamContext {
+    ) -> Result<StreamContext, StageFailure> {
         interaction_ctx
             .write()
             .select_sources(&config.interaction_sources);
 
+        alvr_common::info!(
+            "Stream geometry: encoded={}x{} visible={}x{} refresh={}Hz",
+            config.encoded_view_resolution().x,
+            config.encoded_view_resolution().y,
+            if core_ctx.platform() == Platform::ThinkRealityVRX {
+                VRX_VISIBLE_EYE_RESOLUTION.x
+            } else {
+                config.view_resolution.x
+            },
+            if core_ctx.platform() == Platform::ThinkRealityVRX {
+                VRX_VISIBLE_EYE_RESOLUTION.y
+            } else {
+                config.view_resolution.y
+            },
+            config.refresh_rate_hint,
+        );
+
+        if core_ctx.platform() == Platform::ThinkRealityVRX
+            && config.vrx_graphics_backend == VrxGraphicsBackend::QxrPrivate
+        {
+            if let Err(error) = crate::fault_check("private_service", "instance,session") {
+                error.log(core_ctx.platform());
+            }
+            alvr_common::warn!(
+                "event=vrx_graphics_backend stage=qxr_private_probe code=not_available \
+                fallback=public_mediacodec"
+            );
+        }
+
         let xr_exts = xr_session.instance().exts();
 
         if xr_exts.fb_display_refresh_rate.is_some() {
-            xr_session
-                .request_display_refresh_rate(config.refresh_rate_hint)
-                .unwrap();
+            if let Err(error) = xr_session.request_display_refresh_rate(config.refresh_rate_hint) {
+                let actual = xr_session
+                    .get_display_refresh_rate()
+                    .map_err(|query_error| {
+                        StageFailure::from_error(
+                            "display_refresh_rate_query",
+                            query_error,
+                            false,
+                            "select_supported_refresh_rate_and_reconnect",
+                            "instance,session",
+                        )
+                    })?;
+                validate_refresh_rate(config.refresh_rate_hint, actual)?;
+                StageFailure::from_error(
+                    "display_refresh_rate",
+                    error,
+                    false,
+                    "continue_at_runtime_default_refresh_rate",
+                    "instance,session,interaction_context",
+                )
+                .log(core_ctx.platform());
+            }
         }
 
         let foveation_profile = if let Some(config) = &config.clientside_foveation_config
@@ -146,49 +202,97 @@ impl StreamContext {
             None
         };
 
-        let target_view_resolution = alvr_graphics::compute_target_view_resolution(
-            config.view_resolution,
-            &config.upscaling,
-        );
-        let format = graphics::swapchain_format(&gfx_ctx, &xr_session, config.enable_hdr);
+        let target_view_resolution = if core_ctx.platform() == Platform::ThinkRealityVRX {
+            VRX_VISIBLE_EYE_RESOLUTION
+        } else {
+            alvr_graphics::compute_target_view_resolution(config.view_resolution, &config.upscaling)
+        };
+        let source_crop_uv = if core_ctx.platform() == Platform::ThinkRealityVRX
+            && config.view_resolution == VRX_ENCODED_EYE_RESOLUTION
+        {
+            Vec2::splat(
+                (VRX_ENCODED_EYE_RESOLUTION.x - VRX_VISIBLE_EYE_RESOLUTION.x) as f32
+                    / (2.0 * VRX_ENCODED_EYE_RESOLUTION.x as f32),
+            )
+        } else {
+            Vec2::ZERO
+        };
+        let format = graphics::swapchain_format(&gfx_ctx, &xr_session, config.enable_hdr).map_err(
+            |error| {
+                StageFailure::from_error(
+                    "stream_swapchain_format",
+                    error,
+                    true,
+                    "fallback_to_public_sdr_format",
+                    "instance,session,interaction_context",
+                )
+            },
+        )?;
 
-        let swapchains = [
-            graphics::create_swapchain(
-                &xr_session,
-                &gfx_ctx,
-                target_view_resolution,
-                format,
-                foveation_profile.as_ref(),
-            ),
-            graphics::create_swapchain(
-                &xr_session,
-                &gfx_ctx,
-                target_view_resolution,
-                format,
-                foveation_profile.as_ref(),
-            ),
-        ];
+        let left_swapchain = graphics::create_swapchain(
+            &xr_session,
+            &gfx_ctx,
+            target_view_resolution,
+            format,
+            foveation_profile.as_ref(),
+        )
+        .map_err(|error| {
+            StageFailure::from_error(
+                "stream_swapchain_create",
+                error,
+                true,
+                "destroy_swapchains_and_retry_with_backoff",
+                "instance,session,interaction_context",
+            )
+        })?;
+        let right_swapchain = graphics::create_swapchain(
+            &xr_session,
+            &gfx_ctx,
+            target_view_resolution,
+            format,
+            foveation_profile.as_ref(),
+        )
+        .map_err(|error| {
+            StageFailure::from_error(
+                "stream_swapchain_create",
+                error,
+                true,
+                "destroy_swapchains_and_retry_with_backoff",
+                "instance,session,interaction_context,left_swapchain",
+            )
+        })?;
+        let swapchains = [left_swapchain, right_swapchain];
+
+        let left_images = swapchains[0].enumerate_images().map_err(|error| {
+            StageFailure::from_error(
+                "stream_swapchain_images",
+                error,
+                true,
+                "destroy_swapchains_and_retry_with_backoff",
+                "instance,session,interaction_context,swapchains",
+            )
+        })?;
+        let right_images = swapchains[1].enumerate_images().map_err(|error| {
+            StageFailure::from_error(
+                "stream_swapchain_images",
+                error,
+                true,
+                "destroy_swapchains_and_retry_with_backoff",
+                "instance,session,interaction_context,swapchains",
+            )
+        })?;
 
         let renderer = StreamRenderer::new(
             gfx_ctx,
             config.view_resolution,
             target_view_resolution,
             [
-                swapchains[0]
-                    .enumerate_images()
-                    .unwrap()
-                    .iter()
-                    .map(|i| *i as _)
-                    .collect(),
-                swapchains[1]
-                    .enumerate_images()
-                    .unwrap()
-                    .iter()
-                    .map(|i| *i as _)
-                    .collect(),
+                left_images.iter().map(|i| *i as _).collect(),
+                right_images.iter().map(|i| *i as _).collect(),
             ],
             format,
             config.foveated_encoding_config,
+            source_crop_uv,
             !((core_ctx.platform().is_pico()
                 || (core_ctx.platform() == Platform::SamsungGalaxyXR))
                 && config.enable_hdr),
@@ -196,7 +300,16 @@ impl StreamContext {
             core_ctx.platform() != Platform::SamsungGalaxyXR && !config.enable_hdr,
             config.encoding_gamma,
             config.upscaling.clone(),
-        );
+        )
+        .map_err(|error| {
+            StageFailure::from_error(
+                "stream_renderer_create",
+                error,
+                true,
+                "reconnect_session",
+                "instance,session,swapchains",
+            )
+        })?;
 
         {
             let int_ctx = interaction_ctx.read();
@@ -214,14 +327,32 @@ impl StreamContext {
 
         let input_thread_running = Arc::new(RelaxedAtomic::new(false));
 
-        let stage_reference_space = Arc::new(interaction::get_reference_space(
-            &xr_session,
-            xr::ReferenceSpaceType::STAGE,
-        ));
-        let view_reference_space = Arc::new(interaction::get_reference_space(
-            &xr_session,
-            xr::ReferenceSpaceType::VIEW,
-        ));
+        let stage_reference_space = Arc::new(
+            interaction::get_reference_space(&xr_session, xr::ReferenceSpaceType::STAGE).map_err(
+                |error| {
+                    StageFailure::from_error(
+                        "stream_stage_reference_space",
+                        error,
+                        true,
+                        "reconnect_session",
+                        "instance,session,interaction_context,swapchains,renderer",
+                    )
+                },
+            )?,
+        );
+        let view_reference_space = Arc::new(
+            interaction::get_reference_space(&xr_session, xr::ReferenceSpaceType::VIEW).map_err(
+                |error| {
+                    StageFailure::from_error(
+                        "stream_view_reference_space",
+                        error,
+                        true,
+                        "reconnect_session",
+                        "instance,session,interaction_context,swapchains,renderer",
+                    )
+                },
+            )?,
+        );
 
         let mut this = StreamContext {
             use_custom_reprojection: core_ctx.platform().is_yvr(),
@@ -243,31 +374,47 @@ impl StreamContext {
             decoder: None,
         };
 
-        this.update_reference_space();
+        this.update_reference_space()?;
 
-        this
+        Ok(this)
     }
 
     pub fn uses_passthrough(&self) -> bool {
         self.config.passthrough.is_some()
     }
 
-    pub fn update_reference_space(&mut self) {
+    pub fn update_reference_space(&mut self) -> Result<(), StageFailure> {
         self.input_thread_running.set(false);
 
-        self.stage_reference_space = Arc::new(interaction::get_reference_space(
-            &self.xr_session,
-            xr::ReferenceSpaceType::STAGE,
-        ));
-        self.view_reference_space = Arc::new(interaction::get_reference_space(
-            &self.xr_session,
-            xr::ReferenceSpaceType::VIEW,
-        ));
+        self.stage_reference_space = Arc::new(
+            interaction::get_reference_space(&self.xr_session, xr::ReferenceSpaceType::STAGE)
+                .map_err(|error| {
+                    StageFailure::from_error(
+                        "stream_stage_reference_space_update",
+                        error,
+                        true,
+                        "reconnect_session",
+                        "instance,session,interaction_context,swapchains,renderer",
+                    )
+                })?,
+        );
+        self.view_reference_space = Arc::new(
+            interaction::get_reference_space(&self.xr_session, xr::ReferenceSpaceType::VIEW)
+                .map_err(|error| {
+                    StageFailure::from_error(
+                        "stream_view_reference_space_update",
+                        error,
+                        true,
+                        "reconnect_session",
+                        "instance,session,interaction_context,swapchains,renderer",
+                    )
+                })?,
+        );
 
         self.core_context.send_playspace(
             self.xr_session
                 .reference_space_bounds_rect(xr::ReferenceSpaceType::STAGE)
-                .unwrap()
+                .unwrap_or(None)
                 .map(|a| Vec2::new(a.width, a.height)),
         );
 
@@ -297,10 +444,22 @@ impl StreamContext {
                 )
             }
         }));
+
+        Ok(())
     }
 
-    pub fn maybe_initialize_decoder(&mut self, codec: CodecType, config_nal: Vec<u8>) {
+    pub fn maybe_initialize_decoder(
+        &mut self,
+        codec: CodecType,
+        config_nal: Vec<u8>,
+    ) -> Result<(), StageFailure> {
+        crate::fault_check("decoder", "instance,session,swapchains,input_thread")?;
         let new_config = VideoDecoderConfig {
+            encoded_resolution: (self.core_context.platform() == Platform::ThinkRealityVRX)
+                .then_some(UVec2::new(
+                    self.config.encoded_view_resolution().x * 2,
+                    self.config.encoded_view_resolution().y,
+                )),
             codec,
             force_software_decoder: self.config.force_software_decoder,
             max_buffering_frames: self.config.max_buffering_frames,
@@ -316,18 +475,38 @@ impl StreamContext {
         };
 
         if let Some(config) = maybe_config {
+            // Release the previous decoder and its worker before allocating its replacement.
+            self.decoder.take();
             let (mut sink, source) = video_decoder::create_decoder(config.clone(), {
                 let ctx = Arc::clone(&self.core_context);
                 move |maybe_timestamp: Result<Duration>| match maybe_timestamp {
                     Ok(timestamp) => ctx.report_frame_decoded(timestamp),
                     Err(e) => ctx.report_fatal_decoder_error(&e.to_string()),
                 }
-            });
+            })
+            .map_err(|error| {
+                StageFailure::new(
+                    "decoder_create",
+                    "media_codec_error",
+                    true,
+                    "destroy_decoder_and_retry_public_media_codec",
+                    "instance,session,interaction_context,swapchains,renderer",
+                    format!("{error:#}"),
+                )
+            })?;
             self.decoder = Some((config, source));
 
             self.core_context.set_decoder_input_callback(Box::new(
                 move |timestamp, buffer| -> bool { sink.push_nal(timestamp, buffer) },
             ));
+        }
+
+        Ok(())
+    }
+
+    pub fn discard_unused_decoder_frames(&mut self) {
+        if let Some((_, decoder)) = &mut self.decoder {
+            decoder.discard_unused_frames();
         }
     }
 
@@ -340,7 +519,7 @@ impl StreamContext {
         &mut self,
         frame_interval: Duration,
         vsync_time: Duration,
-    ) -> (ProjectionLayerBuilder<'_>, Duration) {
+    ) -> Result<(ProjectionLayerBuilder<'_>, Duration), StageFailure> {
         let xr_vsync_time = xr::Time::from_nanos(vsync_time.as_nanos() as _);
         let frame_poll_deadline = Instant::now()
             + Duration::from_secs_f32(
@@ -376,15 +555,47 @@ impl StreamContext {
             };
         let view_params = frame_metadata.view_params;
 
-        let left_swapchain_idx = self.swapchains[0].acquire_image().unwrap();
-        let right_swapchain_idx = self.swapchains[1].acquire_image().unwrap();
+        let left_swapchain_idx = self.swapchains[0].acquire_image().map_err(|error| {
+            StageFailure::from_error(
+                "stream_swapchain_acquire",
+                error,
+                true,
+                "reconnect_session",
+                "instance,session,interaction_context,swapchains,renderer,decoder",
+            )
+        })?;
+        let right_swapchain_idx = self.swapchains[1].acquire_image().map_err(|error| {
+            StageFailure::from_error(
+                "stream_swapchain_acquire",
+                error,
+                true,
+                "reconnect_session",
+                "instance,session,interaction_context,swapchains,renderer,decoder",
+            )
+        })?;
 
         self.swapchains[0]
             .wait_image(xr::Duration::INFINITE)
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "stream_swapchain_wait",
+                    error,
+                    true,
+                    "reconnect_session",
+                    "instance,session,interaction_context,swapchains,renderer,decoder",
+                )
+            })?;
         self.swapchains[1]
             .wait_image(xr::Duration::INFINITE)
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "stream_swapchain_wait",
+                    error,
+                    true,
+                    "reconnect_session",
+                    "instance,session,interaction_context,swapchains,renderer,decoder",
+                )
+            })?;
 
         let (flags, maybe_views) = self
             .xr_session
@@ -393,7 +604,15 @@ impl StreamContext {
                 xr_vsync_time,
                 &self.stage_reference_space,
             )
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "stream_locate_views",
+                    error,
+                    true,
+                    "reconnect_session",
+                    "instance,session,interaction_context,swapchains,renderer,decoder",
+                )
+            })?;
 
         let current_headset_views = if flags.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
             maybe_views
@@ -430,28 +649,54 @@ impl StreamContext {
             openxr_display_time = vsync_time;
         }
 
-        self.renderer.render(
-            buffer_ptr,
-            [
-                StreamViewParams {
-                    swapchain_index: left_swapchain_idx,
-                    input_view_params: input_view_params[0],
-                    output_view_params: output_view_params[0],
-                },
-                StreamViewParams {
-                    swapchain_index: right_swapchain_idx,
-                    input_view_params: input_view_params[1],
-                    output_view_params: output_view_params[1],
-                },
-            ],
-            self.config.passthrough.as_ref(),
-            frame_metadata
-                .foveation_center_shifts
-                .map(|centers| centers.map(Vec2::from_array)),
-        );
+        self.renderer
+            .render(
+                buffer_ptr,
+                [
+                    StreamViewParams {
+                        swapchain_index: left_swapchain_idx,
+                        input_view_params: input_view_params[0],
+                        output_view_params: output_view_params[0],
+                    },
+                    StreamViewParams {
+                        swapchain_index: right_swapchain_idx,
+                        input_view_params: input_view_params[1],
+                        output_view_params: output_view_params[1],
+                    },
+                ],
+                self.config.passthrough.as_ref(),
+                frame_metadata
+                    .foveation_center_shifts
+                    .map(|centers| centers.map(Vec2::from_array)),
+            )
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "stream_renderer_render",
+                    error,
+                    true,
+                    "reconnect_session",
+                    "instance,session,swapchains,decoder",
+                )
+            })?;
 
-        self.swapchains[0].release_image().unwrap();
-        self.swapchains[1].release_image().unwrap();
+        self.swapchains[0].release_image().map_err(|error| {
+            StageFailure::from_error(
+                "stream_swapchain_release",
+                error,
+                true,
+                "reconnect_session",
+                "instance,session,interaction_context,swapchains,renderer,decoder",
+            )
+        })?;
+        self.swapchains[1].release_image().map_err(|error| {
+            StageFailure::from_error(
+                "stream_swapchain_release",
+                error,
+                true,
+                "reconnect_session",
+                "instance,session,interaction_context,swapchains,renderer,decoder",
+            )
+        })?;
 
         if !buffer_ptr.is_null()
             && let Some(xr_now) = crate::xr_runtime_now(self.xr_session.instance())
@@ -515,14 +760,16 @@ impl StreamContext {
             clientside_post_processing,
         );
 
-        (layer, openxr_display_time)
+        Ok((layer, openxr_display_time))
     }
 }
 
 impl Drop for StreamContext {
     fn drop(&mut self) {
         self.input_thread_running.set(false);
-        self.input_thread.take().unwrap().join().ok();
+        if let Some(input_thread) = self.input_thread.take() {
+            input_thread.join().ok();
+        }
     }
 }
 
@@ -670,5 +917,54 @@ fn stream_input_loop(
 
         deadline += frame_interval / 3;
         thread::sleep(deadline.saturating_duration_since(Instant::now()));
+    }
+}
+
+fn validate_refresh_rate(requested: f32, actual: f32) -> Result<(), StageFailure> {
+    if actual.is_finite() && (requested - actual).abs() < 0.1 {
+        return Ok(());
+    }
+    Err(StageFailure::new(
+        "display_refresh_rate",
+        "refresh_rate_mismatch",
+        false,
+        "select_runtime_refresh_rate_and_reconnect",
+        "instance,session",
+        format!(
+            "Negotiated {requested} Hz but runtime is {actual} Hz; refusing inconsistent stream timing"
+        ),
+    ))
+}
+fn encoded_view_resolution(
+    view_resolution: UVec2,
+    foveation: Option<&AlvrFoveatedEncodingParams>,
+) -> UVec2 {
+    foveation.map_or(view_resolution, |params| {
+        UVec2::from_array(params.encoded_view_resolution)
+    })
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    #[test]
+    fn decoder_uses_compressed_dimensions_without_changing_eye_target() {
+        let full = VRX_ENCODED_EYE_RESOLUTION;
+        assert_eq!(encoded_view_resolution(full, None), UVec2::splat(2304));
+        let foveation = AlvrFoveatedEncodingParams {
+            encoded_view_resolution: [1440, 1440],
+            ..Default::default()
+        };
+        let encoded = encoded_view_resolution(full, Some(&foveation));
+        assert_eq!(UVec2::new(encoded.x * 2, encoded.y), UVec2::new(2880, 1440));
+        assert_eq!(VRX_VISIBLE_EYE_RESOLUTION, UVec2::splat(2280));
+    }
+    #[test]
+    fn rejected_request_requires_matching_runtime_rate() {
+        assert!(validate_refresh_rate(90.0, 90.0).is_ok());
+        let failure = validate_refresh_rate(72.0, 90.0).unwrap_err();
+        assert_eq!(failure.code, "refresh_rate_mismatch");
+        assert!(!failure.retryable);
+        assert!(validate_refresh_rate(90.0, f32::NAN).is_err());
     }
 }

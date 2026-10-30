@@ -954,8 +954,8 @@ int NvEncoder::GetCapabilityValue(GUID guidCodec, NV_ENC_CAPS capsToQuery)
     }
     NV_ENC_CAPS_PARAM capsParam = { NV_ENC_CAPS_PARAM_VER };
     capsParam.capsToQuery = capsToQuery;
-    int v;
-    m_nvenc.nvEncGetEncodeCaps(m_hEncoder, guidCodec, &capsParam, &v);
+    int v = 0;
+    NVENC_API_CALL(m_nvenc.nvEncGetEncodeCaps(m_hEncoder, guidCodec, &capsParam, &v));
     return v;
 }
 

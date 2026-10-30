@@ -12,8 +12,22 @@ pub const PACKAGE_NAME_STORE: &str = "alvr.client";
 pub const PACKAGE_NAME_GITHUB_DEV: &str = "alvr.client.dev";
 pub const PACKAGE_NAME_GITHUB_STABLE: &str = "alvr.client.stable";
 
+pub const VRX_VISIBLE_EYE_RESOLUTION: alvr_common::glam::UVec2 =
+    alvr_common::glam::UVec2::new(2280, 2280);
+pub const VRX_ENCODED_EYE_RESOLUTION: alvr_common::glam::UVec2 =
+    alvr_common::glam::UVec2::new(2304, 2304);
+
+/// Scale runtime-recommended lobby dimensions without exceeding either runtime limit.
+pub fn lobby_resolution(
+    recommended: alvr_common::glam::UVec2,
+    maximum: alvr_common::glam::UVec2,
+    scale: f32,
+) -> alvr_common::glam::UVec2 {
+    (recommended.as_vec2() * scale).as_uvec2().min(maximum)
+}
+
 // Platform of the device. It is used to match the VR runtime and enable features conditionally.
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Platform {
     Quest1,
     Quest2,
@@ -32,6 +46,7 @@ pub enum Platform {
     FocusVision,
     XRElite,
     ViveUnknown,
+    ThinkRealityVRX,
     Yvr,
     PlayForDreamMR,
     SamsungGalaxyXR,
@@ -101,6 +116,7 @@ impl Display for Platform {
             Self::FocusVision => "VIVE Focus Vision",
             Self::XRElite => "VIVE XR Elite",
             Self::ViveUnknown => "HTC VIVE (unknown)",
+            Self::ThinkRealityVRX => "Lenovo ThinkReality VRX",
             Self::Yvr => "YVR",
             Self::PlayForDreamMR => "Play For Dream MR",
             Self::SamsungGalaxyXR => "Samsung Galaxy XR",
@@ -132,34 +148,7 @@ pub fn platform(runtime_name: Option<String>, runtime_version: Option<u64>) -> P
             runtime_name: {runtime_name:?}, runtime_version: {runtime_version:?}",
         );
 
-        match (
-            manufacturer.as_str(),
-            model.as_str(),
-            device.as_str(),
-            product.as_str(),
-        ) {
-            ("Oculus", _, "monterey", _) => Platform::Quest1,
-            ("Oculus", _, "hollywood", _) => Platform::Quest2,
-            ("Oculus", _, "eureka", _) => Platform::Quest3,
-            ("Oculus", _, "panther", _) => Platform::Quest3S,
-            ("Oculus", _, "seacliff", _) => Platform::QuestPro,
-            ("Oculus", _, _, _) => Platform::QuestUnknown,
-            ("Pico", "Pico Neo 3" | "Pico Neo3 Link", _, _) => Platform::PicoNeo3,
-            ("Pico", _, _, "PICO 4 Pro") => Platform::Pico4Pro,
-            ("Pico", _, _, "PICO 4 Enterprise") => Platform::Pico4Enterprise,
-            ("Pico", _, _, "PICO 4") => Platform::Pico4,
-            ("Pico", _, _, "PICO 4 Ultra") => Platform::Pico4Ultra,
-            ("Pico", _, _, "PICO G3") => Platform::PicoG3,
-            ("Pico", _, _, _) => Platform::PicoUnknown,
-            ("HTC", "VIVE Focus 3", _, _) => Platform::Focus3,
-            ("HTC", "VIVE Focus Vision", _, _) => Platform::FocusVision,
-            ("HTC", "VIVE XR Series", _, _) => Platform::XRElite,
-            ("HTC", _, _, _) => Platform::ViveUnknown,
-            ("YVR", _, _, _) => Platform::Yvr,
-            ("Play For Dream", _, _, _) => Platform::PlayForDreamMR,
-            ("samsung", _, "xrvst2", _) => Platform::SamsungGalaxyXR,
-            _ => Platform::AndroidUnknown,
-        }
+        classify_android_platform(&manufacturer, &model, &device, &product)
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -170,6 +159,39 @@ pub fn platform(runtime_name: Option<String>, runtime_version: Option<u64>) -> P
             "macos" => Platform::Macos,
             _ => Platform::Unknown,
         }
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+fn classify_android_platform(
+    manufacturer: &str,
+    model: &str,
+    device: &str,
+    product: &str,
+) -> Platform {
+    match (manufacturer, model, device, product) {
+        ("Oculus", _, "monterey", _) => Platform::Quest1,
+        ("Oculus", _, "hollywood", _) => Platform::Quest2,
+        ("Oculus", _, "eureka", _) => Platform::Quest3,
+        ("Oculus", _, "panther", _) => Platform::Quest3S,
+        ("Oculus", _, "seacliff", _) => Platform::QuestPro,
+        ("Oculus", _, _, _) => Platform::QuestUnknown,
+        ("Pico", "Pico Neo 3" | "Pico Neo3 Link", _, _) => Platform::PicoNeo3,
+        ("Pico", _, _, "PICO 4 Pro") => Platform::Pico4Pro,
+        ("Pico", _, _, "PICO 4 Enterprise") => Platform::Pico4Enterprise,
+        ("Pico", _, _, "PICO 4") => Platform::Pico4,
+        ("Pico", _, _, "PICO 4 Ultra") => Platform::Pico4Ultra,
+        ("Pico", _, _, "PICO G3") => Platform::PicoG3,
+        ("Pico", _, _, _) => Platform::PicoUnknown,
+        ("HTC", "VIVE Focus 3", _, _) => Platform::Focus3,
+        ("HTC", "VIVE Focus Vision", _, _) => Platform::FocusVision,
+        ("HTC", "VIVE XR Series", _, _) => Platform::XRElite,
+        ("HTC", _, _, _) => Platform::ViveUnknown,
+        ("Lenovo", "VRX", _, _) => Platform::ThinkRealityVRX,
+        ("YVR", _, _, _) => Platform::Yvr,
+        ("Play For Dream", _, _, _) => Platform::PlayForDreamMR,
+        ("samsung", _, "xrvst2", _) => Platform::SamsungGalaxyXR,
+        _ => Platform::AndroidUnknown,
     }
 }
 
@@ -185,4 +207,51 @@ pub enum ClientFlavor {
     Store,
     Github,
     Custom(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Platform, classify_android_platform};
+
+    #[test]
+    fn identifies_think_reality_vrx() {
+        assert_eq!(
+            classify_android_platform("Lenovo", "VRX", "kona", "kona"),
+            Platform::ThinkRealityVRX
+        );
+    }
+
+    #[test]
+    fn does_not_misidentify_other_lenovo_devices() {
+        assert_eq!(
+            classify_android_platform("Lenovo", "ThinkPad", "kona", "kona"),
+            Platform::AndroidUnknown
+        );
+    }
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+    use alvr_common::glam::UVec2;
+    #[test]
+    fn quest3_supersampling_respects_runtime_limits() {
+        let recommended = UVec2::new(2064, 2208);
+        assert_eq!(
+            lobby_resolution(recommended, UVec2::splat(4096), 1.5),
+            UVec2::new(3096, 3312)
+        );
+        assert_eq!(
+            lobby_resolution(recommended, UVec2::new(4000, 4100), 2.0),
+            UVec2::new(4000, 4100)
+        );
+    }
+    #[test]
+    fn vrx_padding_is_twelve_pixels_per_edge() {
+        assert_eq!(
+            (VRX_ENCODED_EYE_RESOLUTION - VRX_VISIBLE_EYE_RESOLUTION) / 2,
+            UVec2::splat(12)
+        );
+        assert_eq!(VRX_ENCODED_EYE_RESOLUTION.x * 2, 4608);
+    }
 }

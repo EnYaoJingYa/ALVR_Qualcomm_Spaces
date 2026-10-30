@@ -49,6 +49,7 @@ void VideoEncoderNVENC::Initialize() {
     NV_ENC_CONFIG encodeConfig = { NV_ENC_CONFIG_VER };
     initializeParams.encodeConfig = &encodeConfig;
 
+    try {
     FillEncodeConfig(
         initializeParams,
         m_refreshRate,
@@ -56,12 +57,19 @@ void VideoEncoderNVENC::Initialize() {
         m_renderHeight,
         m_bitrateInMBits * 1'000'000L
     );
-    try {
+    const int maxWidth = m_NvNecoder->GetCapabilityValue(initializeParams.encodeGUID, NV_ENC_CAPS_WIDTH_MAX);
+    const int maxHeight = m_NvNecoder->GetCapabilityValue(initializeParams.encodeGUID, NV_ENC_CAPS_HEIGHT_MAX);
+    if (m_renderWidth > maxWidth || m_renderHeight > maxHeight) {
+        throw MakeException(
+            "Encoder capability error: codec=%d requested=%dx%d maximum=%dx%d. Select a supported codec; native resolution was preserved.",
+            m_codec, m_renderWidth, m_renderHeight, maxWidth, maxHeight
+        );
+    }
         m_NvNecoder->CreateEncoder(&initializeParams);
     } catch (NVENCException e) {
         if (e.getErrorCode() == NV_ENC_ERR_INVALID_PARAM) {
             throw MakeException(
-                "This GPU does not support H.265 encoding. (NvEncoderCuda NV_ENC_ERR_INVALID_PARAM)"
+                "Encoder rejected the selected codec, resolution, profile or rate (NV_ENC_ERR_INVALID_PARAM). No codec substitution was performed."
             );
         }
         throw MakeException("NvEnc CreateEncoder failed. Code=%d %hs", e.getErrorCode(), e.what());

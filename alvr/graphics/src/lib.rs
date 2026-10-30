@@ -227,7 +227,7 @@ pub struct GraphicsContext {
 
 impl GraphicsContext {
     #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
-    pub fn new_gl() -> Self {
+    pub fn try_new_gl() -> Result<Self, String> {
         use std::mem;
         use wgpu::{
             Backends, DeviceDescriptor, Features, InstanceDescriptor, InstanceFlags, Limits,
@@ -251,7 +251,11 @@ impl GraphicsContext {
             ..Default::default()
         });
 
-        let adapter = instance.enumerate_adapters(Backends::GL).remove(0);
+        let adapter = instance
+            .enumerate_adapters(Backends::GL)
+            .into_iter()
+            .next()
+            .ok_or("No OpenGL ES adapter available")?;
         let (device, queue) = pollster::block_on(adapter.request_device(&DeviceDescriptor {
             label: None,
             required_features: Features::PUSH_CONSTANTS,
@@ -262,9 +266,10 @@ impl GraphicsContext {
             memory_hints: MemoryHints::Performance,
             trace: Trace::Off,
         }))
-        .unwrap();
+        .map_err(|error| format!("request_device: {error}"))?;
 
-        let raw_instance = unsafe { instance.as_hal::<api::Gles>() }.unwrap();
+        let raw_instance =
+            unsafe { instance.as_hal::<api::Gles>() }.ok_or("OpenGL ES instance unavailable")?;
 
         let egl_display = raw_instance.raw_display();
         let egl_config = raw_instance.egl_config();
@@ -279,24 +284,29 @@ impl GraphicsContext {
             image_target_texture_2d,
         ) = unsafe {
             adapter.as_hal::<api::Gles, _, _>(|raw_adapter| {
-                let adapter_context = raw_adapter.unwrap().adapter_context();
-                let egl_instance = adapter_context.egl_instance().unwrap();
+                let adapter_context = raw_adapter
+                    .ok_or("OpenGL ES adapter unavailable")?
+                    .adapter_context();
+                let egl_instance = adapter_context
+                    .egl_instance()
+                    .ok_or("EGL instance unavailable")?;
 
                 let egl_context = egl::Context::from_ptr(adapter_context.raw_context());
 
                 const PBUFFER_ATTRIBS: [i32; 5] = [egl::WIDTH, 16, egl::HEIGHT, 16, egl::NONE];
                 let dummy_surface = egl_instance
                     .create_pbuffer_surface(egl_display, egl_config, &PBUFFER_ATTRIBS)
-                    .unwrap();
+                    .map_err(|error| format!("create_pbuffer_surface: {error}"))?;
 
-                egl_instance
-                    .make_current(
-                        egl_display,
-                        Some(dummy_surface),
-                        Some(dummy_surface),
-                        Some(egl_context),
-                    )
-                    .unwrap();
+                if let Err(error) = egl_instance.make_current(
+                    egl_display,
+                    Some(dummy_surface),
+                    Some(dummy_surface),
+                    Some(egl_context),
+                ) {
+                    let _ = egl_instance.destroy_surface(egl_display, dummy_surface);
+                    return Err(format!("make_current: {error}"));
+                }
 
                 let gl_context = gl::Context::from_loader_function(|fn_name| {
                     egl_instance
@@ -310,6 +320,19 @@ impl GraphicsContext {
                         .map_or(ptr::null(), |f| f as *const c_void)
                 };
 
+                for name in [
+                    CREATE_IMAGE_FN_STR,
+                    DESTROY_IMAGE_FN_STR,
+                    GET_NATIVE_CLIENT_BUFFER_FN_STR,
+                    IMAGE_TARGET_TEXTURE_2D_FN_STR,
+                ] {
+                    if get_fn_ptr(name).is_null() {
+                        let _ = egl_instance.make_current(egl_display, None, None, None);
+                        let _ = egl_instance.destroy_surface(egl_display, dummy_surface);
+                        return Err(format!("Required graphics function unavailable: {name}"));
+                    }
+                }
+
                 let create_image: CreateImageFn = mem::transmute(get_fn_ptr(CREATE_IMAGE_FN_STR));
                 let destroy_image: DestroyImageFn =
                     mem::transmute(get_fn_ptr(DESTROY_IMAGE_FN_STR));
@@ -318,7 +341,7 @@ impl GraphicsContext {
                 let image_target_texture_2d: ImageTargetTexture2DFn =
                     mem::transmute(get_fn_ptr(IMAGE_TARGET_TEXTURE_2D_FN_STR));
 
-                (
+                Ok::<_, String>((
                     egl_context,
                     gl_context,
                     dummy_surface,
@@ -326,11 +349,11 @@ impl GraphicsContext {
                     destroy_image,
                     get_native_client_buffer,
                     image_target_texture_2d,
-                )
+                ))
             })
-        };
+        }?;
 
-        Self {
+        Ok(Self {
             _instance: instance,
             adapter,
             device,
@@ -344,7 +367,12 @@ impl GraphicsContext {
             destroy_image,
             get_native_client_buffer,
             image_target_texture_2d,
-        }
+        })
+    }
+
+    #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
+    pub fn new_gl() -> Self {
+        Self::try_new_gl().expect("Graphics context initialization failed")
     }
 
     #[cfg(any(windows, target_os = "macos", target_os = "ios"))]
@@ -352,17 +380,26 @@ impl GraphicsContext {
         unimplemented!()
     }
 
-    pub fn make_current(&self) {
+    #[cfg(any(windows, target_os = "macos", target_os = "ios"))]
+    pub fn try_new_gl() -> Result<Self, String> {
+        Err("OpenGL ES client is not supported on this platform".into())
+    }
+
+    pub fn make_current(&self) -> Result<(), String> {
+        self.try_make_current()
+    }
+
+    pub fn try_make_current(&self) -> Result<(), String> {
         #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
         unsafe {
-            self.adapter
+            return self
+                .adapter
                 .as_hal::<wgpu::hal::api::Gles, _, _>(|raw_adapter| {
                     let egl_instance = raw_adapter
-                        .unwrap()
+                        .ok_or("OpenGL ES adapter unavailable")?
                         .adapter_context()
                         .egl_instance()
-                        .unwrap();
-
+                        .ok_or("EGL instance unavailable")?;
                     egl_instance
                         .make_current(
                             self.egl_display,
@@ -370,9 +407,11 @@ impl GraphicsContext {
                             Some(self.dummy_surface),
                             Some(self.egl_context),
                         )
-                        .unwrap();
-                })
-        };
+                        .map_err(|e| e.to_string())
+                });
+        }
+        #[cfg(any(windows, target_os = "macos", target_os = "ios"))]
+        Err("OpenGL ES is unavailable on this platform".into())
     }
 
     /// # Safety

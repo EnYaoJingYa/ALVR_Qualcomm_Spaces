@@ -69,11 +69,13 @@ impl StreamRenderer {
         swapchain_textures: [Vec<u32>; 2],
         target_format: u32,
         foveated_encoding: Option<AlvrFoveatedEncodingParams>,
+        source_crop_uv: Vec2,
         enable_srgb_correction: bool,
         fix_limited_range: bool,
         encoding_gamma: f32,
         upscaling: Option<UpscalingConfig>,
-    ) -> Self {
+    ) -> Result<Self, String> {
+        context.try_make_current()?;
         let device = &context.device;
 
         let target_format = super::gl_format_to_wgpu(target_format);
@@ -117,6 +119,8 @@ impl StreamRenderer {
         constants.extend([
             ("ENABLE_SRGB_CORRECTION", enable_srgb_correction.into()),
             ("ENCODING_GAMMA", encoding_gamma.into()),
+            ("SOURCE_CROP_X", source_crop_uv.x.into()),
+            ("SOURCE_CROP_Y", source_crop_uv.y.into()),
         ]);
 
         let (staging_resolution, initial_foveation_uniforms) =
@@ -272,9 +276,9 @@ impl StreamRenderer {
             staging_textures_gl.try_into().unwrap(),
             staging_resolution,
             fix_limited_range,
-        );
+        )?;
 
-        Self {
+        Ok(Self {
             context,
             staging_renderer,
             pipeline,
@@ -282,7 +286,7 @@ impl StreamRenderer {
             foveated_encoding,
             foveation_buffer,
             last_foveation_center_shifts: Cell::new(None),
-        }
+        })
     }
 
     /// Runtime foveation centers must already be encoder-aligned. `None` uses the negotiated centers.
@@ -295,10 +299,11 @@ impl StreamRenderer {
         view_params: [StreamViewParams; 2],
         passthrough: Option<&PassthroughMode>,
         foveation_center_shifts: Option<[Vec2; 2]>,
-    ) {
+    ) -> Result<(), String> {
+        self.context.try_make_current()?;
         // if hardware_buffer is available copy stream to staging texture
         if !hardware_buffer.is_null() {
-            self.staging_renderer.render(hardware_buffer);
+            self.staging_renderer.render(hardware_buffer)?;
         }
 
         if let Some(config) = &self.foveated_encoding
@@ -393,6 +398,7 @@ impl StreamRenderer {
         }
 
         self.context.queue.submit(iter::once(encoder.finish()));
+        Ok(())
     }
 }
 

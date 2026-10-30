@@ -22,11 +22,13 @@ pub fn swapchain_format(
     gfx_ctx: &GraphicsContext,
     session: &xr::Session<xr::OpenGlEs>,
     enable_hdr: bool,
-) -> u32 {
-    gfx_ctx.make_current();
+) -> xr::Result<u32> {
+    gfx_ctx
+        .try_make_current()
+        .map_err(|_| xr::sys::Result::ERROR_GRAPHICS_DEVICE_INVALID)?;
 
-    let formats = session.enumerate_swapchain_formats().unwrap();
-    alvr_graphics::choose_swapchain_format(&formats, enable_hdr)
+    let formats = session.enumerate_swapchain_formats()?;
+    Ok(alvr_graphics::choose_swapchain_format(&formats, enable_hdr))
 }
 
 #[allow(unused_variables)]
@@ -36,9 +38,15 @@ pub fn create_swapchain(
     resolution: UVec2,
     format: u32,
     foveation: Option<&xr::FoveationProfileFB>,
-) -> xr::Swapchain<xr::OpenGlEs> {
-    gfx_ctx.make_current();
+) -> xr::Result<xr::Swapchain<xr::OpenGlEs>> {
+    gfx_ctx
+        .try_make_current()
+        .map_err(|_| xr::sys::Result::ERROR_GRAPHICS_DEVICE_INVALID)?;
 
+    crate::fault_check("swapchain", "instance,session").map_err(|error| {
+        error.log(alvr_system_info::Platform::ThinkRealityVRX);
+        xr::sys::Result::ERROR_RUNTIME_FAILURE
+    })?;
     let swapchain_info = xr::SwapchainCreateInfo {
         create_flags: xr::SwapchainCreateFlags::EMPTY,
         usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT | xr::SwapchainUsageFlags::SAMPLED,
@@ -51,7 +59,13 @@ pub fn create_swapchain(
         mip_count: 1,
     };
 
-    session.create_swapchain(&swapchain_info).unwrap()
+    let swapchain = session.create_swapchain(&swapchain_info)?;
+    alvr_common::info!(
+        "event=openxr_swapchain_created width={} height={} format={format}",
+        resolution.x,
+        resolution.y
+    );
+    Ok(swapchain)
 }
 
 pub struct ProjectionLayerAlphaConfig {

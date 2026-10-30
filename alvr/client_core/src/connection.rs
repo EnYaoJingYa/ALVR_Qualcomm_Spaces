@@ -67,6 +67,7 @@ pub struct ConnectionContext {
     pub decoder_callback: Mutex<Option<Box<DecoderCallback>>>,
     pub video_frame_metadata_queue: Mutex<VecDeque<(Duration, VideoFrameMetadata)>>,
     pub max_prediction: RwLock<Duration>,
+    pub fatal_decoder_error: Mutex<Option<String>>,
 }
 
 fn set_hud_message(event_queue: &Mutex<VecDeque<ClientCoreEvent>>, message: &str) {
@@ -278,6 +279,7 @@ fn connection_pipeline(
         let ctx = Arc::clone(&ctx);
         move || {
             let mut stream_corrupted = true;
+            let mut last_idr_request: Option<Instant> = None;
             while is_streaming(&ctx) {
                 let data = match video_receiver.recv(STREAMING_RECV_TIMEOUT) {
                     Ok(data) => data,
@@ -296,13 +298,22 @@ fn connection_pipeline(
                     stream_corrupted = false;
                 } else if data.had_packet_loss() {
                     stream_corrupted = true;
-                    if let Some(sender) = &mut *ctx.control_sender.lock() {
-                        sender.send(&ClientControlPacket::RequestIdr).ok();
+                    if last_idr_request.is_none_or(|last| {
+                        last.elapsed()
+                            >= Duration::from_millis(settings.connection.minimum_idr_interval_ms)
+                    }) {
+                        if let Some(sender) = &mut *ctx.control_sender.lock() {
+                            sender.send(&ClientControlPacket::RequestIdr).ok();
+                            last_idr_request = Some(Instant::now());
+                        }
                     }
                     warn!("Network dropped video packet");
                 }
 
-                if !stream_corrupted || !settings.connection.avoid_video_glitching {
+                if !stream_corrupted
+                    || !(settings.connection.avoid_video_glitching
+                        || capabilities.platform == alvr_system_info::Platform::ThinkRealityVRX)
+                {
                     // Metadata must be available before the decoder can return this frame.
                     {
                         let queue_mut = &mut *ctx.video_frame_metadata_queue.lock();
@@ -327,14 +338,28 @@ fn connection_pipeline(
 
                     if !submitted {
                         stream_corrupted = true;
-                        if let Some(sender) = &mut *ctx.control_sender.lock() {
-                            sender.send(&ClientControlPacket::RequestIdr).ok();
+                        if last_idr_request.is_none_or(|last| {
+                            last.elapsed()
+                                >= Duration::from_millis(
+                                    settings.connection.minimum_idr_interval_ms,
+                                )
+                        }) {
+                            if let Some(sender) = &mut *ctx.control_sender.lock() {
+                                sender.send(&ClientControlPacket::RequestIdr).ok();
+                                last_idr_request = Some(Instant::now());
+                            }
                         }
                         warn!("Dropped video packet. Reason: Decoder saturation")
                     }
                 } else {
-                    if let Some(sender) = &mut *ctx.control_sender.lock() {
-                        sender.send(&ClientControlPacket::RequestIdr).ok();
+                    if last_idr_request.is_none_or(|last| {
+                        last.elapsed()
+                            >= Duration::from_millis(settings.connection.minimum_idr_interval_ms)
+                    }) {
+                        if let Some(sender) = &mut *ctx.control_sender.lock() {
+                            sender.send(&ClientControlPacket::RequestIdr).ok();
+                            last_idr_request = Some(Instant::now());
+                        }
                     }
                     warn!("Dropped video packet. Reason: Waiting for IDR frame")
                 }
@@ -539,6 +564,7 @@ fn connection_pipeline(
                         info!("Client disconnected. Cause: {e}");
                         set_hud_message(&event_queue, SERVER_DISCONNECTED_MESSAGE);
                         disconnect_notif.notify_one();
+                        break;
                     }
                 }
             }

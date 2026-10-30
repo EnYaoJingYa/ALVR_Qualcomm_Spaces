@@ -45,6 +45,7 @@ SUBCOMMANDS:
 
 FLAGS:
     --help              Print this text
+    --spaces-loader <PATH> Install a public Spaces loader before build-client
     --keep-config       Preserve the configuration file between rebuilds (session.json)
     --no-nvidia         Disables nVidia support on Linux. For prepare-deps subcommand
     --release           Optimized build with less debug checks. For build subcommands
@@ -196,6 +197,8 @@ fn main() {
 
         let version: Option<String> = args.opt_value_from_str("--version").unwrap();
         let root: Option<String> = args.opt_value_from_str("--root").unwrap();
+        let spaces_loader: Option<std::path::PathBuf> =
+            args.opt_value_from_str("--spaces-loader").unwrap();
 
         let package_flavor = if args.contains("--meta-store") {
             ReleaseFlavor::MetaStore
@@ -233,7 +236,12 @@ fn main() {
                 }
                 "build-launcher" => build::build_launcher(profile, false),
                 "build-server-lib" => build::build_server_lib(profile, None, false),
-                "build-client" => build::build_android_client(profile),
+                "build-client" => {
+                    if let Some(source) = spaces_loader {
+                        build::sync_spaces_openxr_loader(source);
+                    }
+                    build::build_android_client(profile);
+                }
                 "build-client-lib" => {
                     build::build_android_client_core_lib(profile, link_stdcpp, all_targets)
                 }

@@ -34,9 +34,9 @@ pub enum FrameSize {
     Scale(#[schema(gui(slider(min = 0.25, max = 2.0, step = 0.01)))] f32),
 
     Absolute {
-        #[schema(gui(slider(min = 32, max = 8192, step = 32)))]
+        #[schema(gui(slider(min = 32, max = 8192, step = 8)))]
         width: u32,
-        #[schema(gui(slider(min = 32, max = 8192, step = 32)))]
+        #[schema(gui(slider(min = 32, max = 8192, step = 8)))]
         height: Option<u32>,
     },
 }
@@ -519,6 +519,16 @@ pub enum CodecType {
     AV1 = 2,
 }
 
+#[derive(SettingsSchema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Default)]
+#[schema(gui = "button_group")]
+pub enum VrxGraphicsBackend {
+    #[default]
+    #[schema(strings(display_name = "Public MediaCodec"))]
+    PublicMediaCodec,
+    #[schema(strings(display_name = "QXR private (experimental)"))]
+    QxrPrivate,
+}
+
 #[repr(u8)]
 #[derive(SettingsSchema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 #[schema(gui = "button_group")]
@@ -732,6 +742,14 @@ For eye-tracked foveation, enable Headset > Face tracking > Sink > Eye-tracked f
     ))]
     pub force_software_decoder: bool,
 
+    #[schema(strings(
+        display_name = "VRX graphics backend",
+        help = "Public MediaCodec/OpenXR is the stable default. QXR private is an experimental \
+        local service path and automatically falls back when unavailable."
+    ))]
+    #[schema(flag = "steamvr-restart")]
+    pub vrx_graphics_backend: VrxGraphicsBackend,
+
     pub mediacodec_extra_options: Vec<(String, MediacodecProperty)>,
 
     #[schema(strings(
@@ -864,6 +882,8 @@ pub enum HeadsetEmulationMode {
     Quest2,
     #[schema(strings(display_name = "Quest Pro"))]
     QuestPro,
+    #[schema(strings(display_name = "ThinkReality VRX"))]
+    ThinkRealityVRX,
     #[schema(strings(display_name = "Pico 4"))]
     Pico4,
     Vive,
@@ -1017,6 +1037,8 @@ pub enum ControllersEmulationMode {
     Quest3Plus,
     #[schema(strings(display_name = "Quest Pro"))]
     QuestPro,
+    #[schema(strings(display_name = "ThinkReality VRX"))]
+    ThinkRealityVRX,
     #[schema(strings(display_name = "Pico 4"))]
     Pico4,
     #[schema(strings(display_name = "PSVR2 Sense Controller"))]
@@ -1907,6 +1929,9 @@ pub fn session_settings_default() -> SettingsDefault {
                 },
             },
             force_software_decoder: false,
+            vrx_graphics_backend: VrxGraphicsBackendDefault {
+                variant: VrxGraphicsBackendDefaultVariant::PublicMediaCodec,
+            },
             color_correction: SwitchDefault {
                 enabled: false,
                 content: ColorCorrectionConfigDefault {

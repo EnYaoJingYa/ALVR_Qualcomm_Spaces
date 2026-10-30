@@ -72,6 +72,7 @@ pub fn initialize_environment(layout: afs::Layout) {
 }
 
 pub struct ServerNegotiatedStreamingConfig {
+    pub center_composition: bool,
     pub transcoding_view_resolution: UVec2,
     pub emulated_headset_view_resolution: UVec2,
     pub refresh_rate: f32,
@@ -188,6 +189,7 @@ pub struct ServerCoreContext {
     connection_context: Arc<ConnectionContext>,
     connection_thread: Arc<RwLock<Option<JoinHandle<()>>>>,
     webserver_runtime: Option<Runtime>,
+    last_prediction_warning: Mutex<Option<Instant>>,
 }
 
 impl ServerCoreContext {
@@ -248,6 +250,7 @@ impl ServerCoreContext {
                 connection_context,
                 connection_thread: Arc::new(RwLock::new(None)),
                 webserver_runtime: Some(webserver_runtime),
+                last_prediction_warning: Mutex::new(None),
             },
             events_receiver,
         )
@@ -319,7 +322,27 @@ impl ServerCoreContext {
             Duration::from_millis(SESSION_MANAGER.read().settings().headset.max_prediction_ms);
 
         if latency > max_prediction {
-            warn!("Latency is too high. Clamping prediction");
+            // Pose queries run several times per frame. Keep the clamp, but avoid flooding
+            // the log file and dashboard while a high-latency condition persists.
+            let should_warn = {
+                let now = Instant::now();
+                let mut last_warning = self.last_prediction_warning.lock();
+                if last_warning
+                    .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(5))
+                {
+                    *last_warning = Some(now);
+                    true
+                } else {
+                    false
+                }
+            };
+            if should_warn {
+                warn!(
+                    "event=prediction_clamped latency_ms={:.2} limit_ms={:.2} action=limit_pose_prediction",
+                    latency.as_secs_f64() * 1000.,
+                    max_prediction.as_secs_f64() * 1000.,
+                );
+            }
 
             max_prediction
         } else {

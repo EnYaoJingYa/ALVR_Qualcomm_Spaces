@@ -14,7 +14,8 @@ pub fn registered_button_set(
         | ControllersEmulationMode::Quest1Touch
         | ControllersEmulationMode::Quest2Touch
         | ControllersEmulationMode::Quest3Plus
-        | ControllersEmulationMode::QuestPro => CONTROLLER_PROFILE_INFO
+        | ControllersEmulationMode::QuestPro
+        | ControllersEmulationMode::ThinkRealityVRX => CONTROLLER_PROFILE_INFO
             .get(&QUEST_CONTROLLER_PROFILE_ID)
             .unwrap()
             .button_set

@@ -715,18 +715,26 @@ pub extern "C" fn alvr_start_stream_opengl(config: AlvrStreamConfig) {
         upscale_factor: config.upscale_factor,
     });
 
-    STREAM_RENDERER.set(Some(StreamRenderer::new(
+    let renderer = StreamRenderer::new(
         GRAPHICS_CONTEXT.with_borrow(|c| c.as_ref().unwrap().clone()),
         view_resolution,
         alvr_graphics::compute_target_view_resolution(view_resolution, &upscaling),
         swapchain_textures,
         SDR_FORMAT_GL,
         foveated_encoding,
+        alvr_common::glam::Vec2::ZERO,
         true,
         false, // TODO: limited range fix config
         1.0,   // TODO: encoding gamma config
         upscaling,
-    )));
+    );
+    match renderer {
+        Ok(renderer) => STREAM_RENDERER.set(Some(renderer)),
+        Err(error) => {
+            STREAM_RENDERER.set(None);
+            error!("Stream renderer initialization failed: {error}");
+        }
+    }
 }
 
 // todo: support hands
@@ -792,7 +800,7 @@ pub extern "C" fn alvr_render_stream_opengl(
         if let Some(renderer) = renderer {
             let left_params = unsafe { &*view_params };
             let right_params = unsafe { &*view_params.offset(1) };
-            renderer.render(
+            if let Err(error) = renderer.render(
                 hardware_buffer,
                 [
                     StreamViewParams {
@@ -832,7 +840,9 @@ pub extern "C" fn alvr_render_stream_opengl(
                 // # Safety: the caller provides either null or a valid 2x2 centers array.
                 unsafe { foveation_center_shifts.as_ref() }
                     .map(|centers| centers.map(Vec2::from_array)),
-            );
+            ) {
+                error!("Stream rendering failed: {error}");
+            }
         }
     });
 }
@@ -880,6 +890,7 @@ pub struct AlvrDecoderConfig {
 #[unsafe(no_mangle)]
 pub extern "C" fn alvr_create_decoder(config: AlvrDecoderConfig) {
     let config = VideoDecoderConfig {
+        encoded_resolution: None,
         codec: match config.codec {
             AlvrCodecType::H264 => CodecType::H264,
             AlvrCodecType::Hevc => CodecType::Hevc,
@@ -928,7 +939,7 @@ pub extern "C" fn alvr_create_decoder(config: AlvrDecoderConfig) {
         },
     };
 
-    let (mut sink, source) =
+    let Ok((mut sink, source)) =
         video_decoder::create_decoder(config, |maybe_timestamp: Result<Duration>| {
             if let Some(context) = &*CLIENT_CORE_CONTEXT.lock() {
                 match maybe_timestamp {
@@ -936,7 +947,11 @@ pub extern "C" fn alvr_create_decoder(config: AlvrDecoderConfig) {
                     Err(e) => context.report_fatal_decoder_error(&e.to_string()),
                 }
             }
-        });
+        })
+    else {
+        error!("event=decoder_stage_failed stage=decoder_create fallback=public_software_decoder");
+        return;
+    };
 
     *DECODER_SOURCE.lock() = Some(source);
 

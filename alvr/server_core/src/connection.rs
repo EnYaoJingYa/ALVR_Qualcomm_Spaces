@@ -33,6 +33,7 @@ use alvr_sockets::{
     CONTROL_PORT, KEEPALIVE_INTERVAL, KEEPALIVE_TIMEOUT, ProtoControlSocket, SocketConnection,
     StreamSocketConfig, WIRED_CLIENT_HOSTNAME,
 };
+use alvr_system_info::Platform;
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
@@ -57,6 +58,60 @@ pub struct VideoPacket {
 
 fn align32(value: f32) -> u32 {
     ((value / 32.).floor() * 32.) as u32
+}
+
+fn align16(value: f32) -> u32 {
+    ((value / 16.).floor() * 16.) as u32
+}
+
+fn platform_view_resolution(platform: Platform, resolution: Vec2) -> UVec2 {
+    match platform {
+        // The VRX visible and encoded resolutions are intentionally selected
+        // by the VRX preset. The encoder performs macroblock padding separately.
+        Platform::ThinkRealityVRX => {
+            UVec2::new(resolution.x.round() as u32, resolution.y.round() as u32)
+        }
+        // Stereo encoding doubles the per-eye width, so a 16-pixel per-eye
+        // horizontal alignment still produces a 32-pixel aligned stream.
+        Platform::Quest3 => UVec2::new(align16(resolution.x), align32(resolution.y)),
+        _ => UVec2::new(align32(resolution.x), align32(resolution.y)),
+    }
+}
+
+fn streaming_platform(platform: &str) -> Platform {
+    match platform {
+        "Quest 3" => Platform::Quest3,
+        "Quest 3S" => Platform::Quest3S,
+        "Lenovo ThinkReality VRX" => Platform::ThinkRealityVRX,
+        _ => Platform::AndroidUnknown,
+    }
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::platform_view_resolution;
+    use alvr_common::glam::Vec2;
+    use alvr_system_info::Platform;
+
+    #[test]
+    fn keeps_quest3_native_horizontal_resolution() {
+        assert_eq!(
+            platform_view_resolution(Platform::Quest3, Vec2::new(2064.0, 2208.0)),
+            alvr_common::glam::UVec2::new(2064, 2208)
+        );
+    }
+
+    #[test]
+    fn preserves_vrx_visible_and_encoded_resolutions() {
+        assert_eq!(
+            platform_view_resolution(Platform::ThinkRealityVRX, Vec2::new(2280.0, 2280.0)),
+            alvr_common::glam::UVec2::new(2280, 2280)
+        );
+        assert_eq!(
+            platform_view_resolution(Platform::ThinkRealityVRX, Vec2::new(2304.0, 2304.0)),
+            alvr_common::glam::UVec2::new(2304, 2304)
+        );
+    }
 }
 
 fn is_streaming(client_hostname: &str) -> bool {
@@ -110,6 +165,7 @@ pub fn compute_restart_settings_hash(
             ControllersEmulationMode::Quest2Touch => 2,
             ControllersEmulationMode::Quest3Plus => 3,
             ControllersEmulationMode::QuestPro => 4,
+            ControllersEmulationMode::ThinkRealityVRX => 5,
             ControllersEmulationMode::Pico4 => 10,
             ControllersEmulationMode::ValveIndex => 20,
             ControllersEmulationMode::ViveWand => 40,
@@ -578,8 +634,10 @@ fn connection_pipeline(
         ClientConnectionsAction::UpdateCurrentIp(Some(client_ip)),
     );
 
+    let platform_string;
     let maybe_streaming_caps =
         if let ClientConnectionResult::ConnectionAccepted(info) = connection_result {
+            platform_string = info.platform_string.clone();
             session_manager_lock.update_client_connections(
                 client_hostname.clone(),
                 ClientConnectionsAction::SetDisplayName(info.platform_string),
@@ -604,10 +662,11 @@ fn connection_pipeline(
     let Some(streaming_caps) = maybe_streaming_caps else {
         con_bail!("Only streaming clients are supported for now");
     };
+    let streaming_platform = streaming_platform(&platform_string);
 
     let initial_settings = session_manager_lock.settings().clone();
 
-    fn get_view_res(config: FrameSize, default_res: UVec2) -> UVec2 {
+    fn get_view_res(platform: Platform, config: FrameSize, default_res: UVec2) -> UVec2 {
         let res = match config {
             FrameSize::Scale(scale) => default_res.as_vec2() * scale,
             FrameSize::Absolute { width, height } => {
@@ -625,10 +684,11 @@ fn connection_pipeline(
             }
         };
 
-        UVec2::new(align32(res.x), align32(res.y))
+        platform_view_resolution(platform, res)
     }
 
     let mut transcoding_view_resolution = get_view_res(
+        streaming_platform,
         initial_settings.video.transcoding_view_resolution.clone(),
         streaming_caps.default_view_resolution,
     );
@@ -651,25 +711,52 @@ fn connection_pipeline(
             > streaming_caps.max_view_resolution.x as f32
                 / streaming_caps.max_view_resolution.y as f32
         {
-            transcoding_view_resolution = UVec2::new(
-                align32(streaming_caps.max_view_resolution.x as f32),
-                align32(streaming_caps.max_view_resolution.x as f32 / transcoding_ratio),
+            transcoding_view_resolution = platform_view_resolution(
+                streaming_platform,
+                Vec2::new(
+                    streaming_caps.max_view_resolution.x as f32,
+                    streaming_caps.max_view_resolution.x as f32 / transcoding_ratio,
+                ),
             );
         } else {
-            transcoding_view_resolution = UVec2::new(
-                align32(streaming_caps.max_view_resolution.y as f32 * transcoding_ratio),
-                align32(streaming_caps.max_view_resolution.y as f32),
+            transcoding_view_resolution = platform_view_resolution(
+                streaming_platform,
+                Vec2::new(
+                    streaming_caps.max_view_resolution.y as f32 * transcoding_ratio,
+                    streaming_caps.max_view_resolution.y as f32,
+                ),
             );
         }
     }
 
-    let emulated_headset_view_resolution = get_view_res(
+    if streaming_platform == Platform::ThinkRealityVRX {
+        transcoding_view_resolution = alvr_system_info::VRX_ENCODED_EYE_RESOLUTION;
+    }
+
+    let mut emulated_headset_view_resolution = get_view_res(
+        streaming_platform,
         initial_settings
             .video
             .emulated_headset_view_resolution
             .clone(),
         streaming_caps.default_view_resolution,
     );
+
+    if streaming_platform == Platform::ThinkRealityVRX {
+        emulated_headset_view_resolution = alvr_system_info::VRX_VISIBLE_EYE_RESOLUTION;
+        if !matches!(
+            initial_settings.headset.emulation_mode,
+            alvr_session::HeadsetEmulationMode::ThinkRealityVRX
+        ) {
+            con_bail!(
+                "VRX requires the ThinkReality VRX headset preset for centered native composition"
+            );
+        }
+        if !matches!(&initial_settings.headset.controllers, Switch::Enabled(c) if matches!(c.emulation_mode, ControllersEmulationMode::ThinkRealityVRX))
+        {
+            con_bail!("VRX requires native ThinkReality VRX controllers");
+        }
+    }
 
     let fps = {
         let mut best_match = 0_f32;
@@ -1450,8 +1537,9 @@ fn connection_pipeline(
     ctx.events_sender
         .send(ServerCoreEvent::ClientConnected(
             ServerNegotiatedStreamingConfig {
+                center_composition: streaming_platform == Platform::ThinkRealityVRX,
                 transcoding_view_resolution,
-                emulated_headset_view_resolution: transcoding_view_resolution,
+                emulated_headset_view_resolution,
                 refresh_rate: fps as _,
                 foveated_encoding,
                 codec,

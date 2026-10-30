@@ -8,6 +8,38 @@ use std::{
 };
 use xshell::{Shell, cmd};
 
+fn copy_dir_contents(source: &std::path::Path, destination: &std::path::Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir_contents(&source_path, &destination_path);
+        } else {
+            fs::copy(source_path, destination_path).unwrap();
+        }
+    }
+}
+
+pub fn sync_spaces_openxr_loader(source: PathBuf) {
+    // Keep the VRX client on the public Snapdragon Spaces loader. The SDK is
+    // stored outside this repository so the loader is not duplicated in Git.
+    let destination = afs::deps_dir().join("android_openxr/arm64-v8a/libopenxr_loader_spaces.so");
+
+    if !source.is_file() {
+        panic!(
+            "Snapdragon Spaces OpenXR loader not found at {}. Restore the official Spaces SDK \
+            assets before building the VRX client.",
+            source.display()
+        );
+    }
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    if !destination.is_file() || fs::read(&source).unwrap() != fs::read(&destination).unwrap() {
+        fs::copy(&source, &destination).unwrap();
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum Profile {
     Debug,
@@ -228,6 +260,19 @@ pub fn build_streamer(
             build_layout.openvr_driver_manifest(),
         )
         .unwrap();
+
+        // Private-use controller assets are intentionally untracked. When the
+        // local asset directory exists, include it in the standalone streamer.
+        let private_vrx_resources = afs::workspace_dir().join("private/vrx-controller/resources");
+        if private_vrx_resources.is_dir() {
+            // SteamVR resolves {alvr_server} against the driver-root resources.
+            copy_dir_contents(&private_vrx_resources, &build_layout.resources_dir());
+            // Also provide the explicitly requested local win64 resource bundle.
+            copy_dir_contents(
+                &private_vrx_resources,
+                &build_layout.openvr_driver_lib_dir().join("resources"),
+            );
+        }
     }
 }
 

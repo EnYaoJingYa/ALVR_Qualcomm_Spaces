@@ -1,5 +1,5 @@
 use crate::{
-    Platform,
+    Platform, StageFailure,
     extra_extensions::{
         self, BodyTrackerBD, BodyTrackerFB, EyeTrackerSocial, FaceTracker2FB, FaceTrackerBD,
         FacialTrackerHTC, MotionTrackerBD, MultimodalMeta,
@@ -193,17 +193,40 @@ impl InteractionContext {
         extra_extensions: Vec<String>,
         xr_system: xr::SystemId,
         platform: Platform,
-    ) -> Self {
+    ) -> Result<Self, StageFailure> {
+        crate::fault_check("input", "instance,session")?;
         let xr_instance = xr_session.instance();
 
-        let action_set = xr_instance
-            .create_action_set("alvr_interaction", "ALVR interaction", 0)
-            .unwrap();
+        let action_set =
+            match xr_instance.create_action_set("alvr_interaction", "ALVR interaction", 0) {
+                Ok(action_set) => action_set,
+                Err(error) => {
+                    return Err(StageFailure::from_error(
+                        "input_action_set_create",
+                        error,
+                        true,
+                        "destroy_session_and_retry_with_backoff",
+                        "instance,session",
+                    ));
+                }
+            };
 
         let mut bindings = vec![];
 
-        fn binding<'a, T: xr::ActionTy>(action: &'a xr::Action<T>, path: &str) -> xr::Binding<'a> {
-            xr::Binding::new(action, action.instance().string_to_path(path).unwrap())
+        fn binding<'a, T: xr::ActionTy>(
+            action: &'a xr::Action<T>,
+            path: &str,
+        ) -> Result<xr::Binding<'a>, StageFailure> {
+            let path = action.instance().string_to_path(path).map_err(|error| {
+                StageFailure::from_error(
+                    "input_binding_path",
+                    error,
+                    false,
+                    "disable_invalid_optional_binding_or_return_to_waiting_activity",
+                    "instance,session,action_set",
+                )
+            })?;
+            Ok(xr::Binding::new(action, path))
         }
 
         let controllers_profile_path = match platform {
@@ -226,11 +249,29 @@ impl InteractionContext {
         let mut button_actions = HashMap::new();
         let button_set = CONTROLLER_PROFILE_INFO
             .get(&controllers_profile_id)
-            .unwrap()
+            .ok_or_else(|| {
+                StageFailure::new(
+                    "input_profile_lookup",
+                    "alvr_controller_profile_not_found",
+                    false,
+                    "return_to_waiting_activity",
+                    "instance,session,action_set",
+                    controllers_profile_path,
+                )
+            })?
             .button_set
             .clone();
         for button_id in &button_set {
-            let info = BUTTON_INFO.get(button_id).unwrap();
+            let Some(info) = BUTTON_INFO.get(button_id) else {
+                return Err(StageFailure::new(
+                    "input_button_lookup",
+                    "alvr_button_info_not_found",
+                    false,
+                    "return_to_waiting_activity",
+                    "instance,session,action_set",
+                    button_id.to_string(),
+                ));
+            };
 
             let name = info.path[1..].replace('/', "_");
             let display_name = format!(
@@ -241,10 +282,30 @@ impl InteractionContext {
 
             let action = match info.button_type {
                 ButtonType::Binary => ButtonAction::Binary(
-                    action_set.create_action(&name, &display_name, &[]).unwrap(),
+                    action_set
+                        .create_action(&name, &display_name, &[])
+                        .map_err(|error| {
+                            StageFailure::from_error(
+                                "input_button_action_create",
+                                error,
+                                true,
+                                "destroy_session_and_retry_with_backoff",
+                                "instance,session,action_set",
+                            )
+                        })?,
                 ),
                 ButtonType::Scalar => ButtonAction::Scalar(
-                    action_set.create_action(&name, &display_name, &[]).unwrap(),
+                    action_set
+                        .create_action(&name, &display_name, &[])
+                        .map_err(|error| {
+                            StageFailure::from_error(
+                                "input_button_action_create",
+                                error,
+                                true,
+                                "destroy_session_and_retry_with_backoff",
+                                "instance,session,action_set",
+                            )
+                        })?,
                 ),
             };
             button_actions.insert(*button_id, action);
@@ -252,35 +313,92 @@ impl InteractionContext {
 
         let left_grip_action = action_set
             .create_action("left_grip_pose", "Left grip pose", &[])
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "input_pose_action_create",
+                    error,
+                    true,
+                    "destroy_session_and_retry_with_backoff",
+                    "instance,session,action_set",
+                )
+            })?;
         let right_grip_action = action_set
             .create_action("right_grip_pose", "Right grip pose", &[])
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "input_pose_action_create",
+                    error,
+                    true,
+                    "destroy_session_and_retry_with_backoff",
+                    "instance,session,action_set",
+                )
+            })?;
 
         let left_aim_action = action_set
             .create_action("left_aim_pose", "Left aim pose", &[])
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "input_pose_action_create",
+                    error,
+                    true,
+                    "destroy_session_and_retry_with_backoff",
+                    "instance,session,action_set",
+                )
+            })?;
         let right_aim_action = action_set
             .create_action("right_aim_pose", "Right aim pose", &[])
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "input_pose_action_create",
+                    error,
+                    true,
+                    "destroy_session_and_retry_with_backoff",
+                    "instance,session,action_set",
+                )
+            })?;
 
         let left_vibration_action = action_set
             .create_action("left_hand_vibration", "Left hand vibration", &[])
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "input_haptic_action_create",
+                    error,
+                    true,
+                    "destroy_session_and_retry_with_backoff",
+                    "instance,session,action_set",
+                )
+            })?;
         let right_vibration_action = action_set
             .create_action("right_hand_vibration", "Right hand vibration", &[])
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "input_haptic_action_create",
+                    error,
+                    true,
+                    "destroy_session_and_retry_with_backoff",
+                    "instance,session,action_set",
+                )
+            })?;
 
         // Create action bindings:
 
         for (id, action) in &button_actions {
-            let path = &BUTTON_INFO.get(id).unwrap().path;
+            let Some(info) = BUTTON_INFO.get(id) else {
+                return Err(StageFailure::new(
+                    "input_button_lookup",
+                    "alvr_button_info_not_found",
+                    false,
+                    "return_to_waiting_activity",
+                    "instance,session,action_set",
+                    id.to_string(),
+                ));
+            };
             match action {
                 ButtonAction::Binary(action) => {
-                    bindings.push(binding(action, path));
+                    bindings.push(binding(action, &info.path)?);
                 }
                 ButtonAction::Scalar(action) => {
-                    bindings.push(binding(action, path));
+                    bindings.push(binding(action, &info.path)?);
                 }
             }
         }
@@ -288,26 +406,26 @@ impl InteractionContext {
         bindings.push(binding(
             &left_grip_action,
             "/user/hand/left/input/grip/pose",
-        ));
+        )?);
         bindings.push(binding(
             &right_grip_action,
             "/user/hand/right/input/grip/pose",
-        ));
+        )?);
 
-        bindings.push(binding(&left_aim_action, "/user/hand/left/input/aim/pose"));
+        bindings.push(binding(&left_aim_action, "/user/hand/left/input/aim/pose")?);
         bindings.push(binding(
             &right_aim_action,
             "/user/hand/right/input/aim/pose",
-        ));
+        )?);
 
         bindings.push(binding(
             &left_vibration_action,
             "/user/hand/left/output/haptic",
-        ));
+        )?);
         bindings.push(binding(
             &right_vibration_action,
             "/user/hand/right/output/haptic",
-        ));
+        )?);
 
         let multimodal_handle = check_ext_object(
             "MultimodalMeta",
@@ -327,7 +445,15 @@ impl InteractionContext {
                         "Left detached grip pose",
                         &[],
                     )
-                    .unwrap(),
+                    .map_err(|error| {
+                        StageFailure::from_error(
+                            "optional_input_action_create",
+                            error,
+                            true,
+                            "disable_optional_detached_controllers_and_continue",
+                            "instance,session,action_set",
+                        )
+                    })?,
             );
             let right_detached_grip_action = right_detached_grip_action.insert(
                 action_set
@@ -336,17 +462,25 @@ impl InteractionContext {
                         "Right detached grip pose",
                         &[],
                     )
-                    .unwrap(),
+                    .map_err(|error| {
+                        StageFailure::from_error(
+                            "optional_input_action_create",
+                            error,
+                            true,
+                            "disable_optional_detached_controllers_and_continue",
+                            "instance,session,action_set",
+                        )
+                    })?,
             );
 
             bindings.push(binding(
                 left_detached_grip_action,
                 "/user/detached_controller_meta/left/input/grip/pose",
-            ));
+            )?);
             bindings.push(binding(
                 right_detached_grip_action,
                 "/user/detached_controller_meta/right/input/grip/pose",
-            ));
+            )?);
         }
 
         // Apply bindings:
@@ -354,34 +488,88 @@ impl InteractionContext {
             .suggest_interaction_profile_bindings(
                 xr_instance
                     .string_to_path(controllers_profile_path)
-                    .unwrap(),
+                    .map_err(|error| {
+                        StageFailure::from_error(
+                            "input_profile_path",
+                            error,
+                            false,
+                            "return_to_waiting_activity",
+                            "instance,session,action_set",
+                        )
+                    })?,
                 &bindings,
             )
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "input_profile_bindings",
+                    error,
+                    true,
+                    "destroy_session_and_retry_with_backoff",
+                    "instance,session,action_set,bindings",
+                )
+            })?;
 
         let left_grip_space = left_grip_action
             .create_space(&xr_session, xr::Path::NULL, xr::Posef::IDENTITY)
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "input_action_space_create",
+                    error,
+                    true,
+                    "destroy_session_and_retry_with_backoff",
+                    "instance,session,action_set,actions",
+                )
+            })?;
         let right_grip_space = right_grip_action
             .create_space(&xr_session, xr::Path::NULL, xr::Posef::IDENTITY)
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "input_action_space_create",
+                    error,
+                    true,
+                    "destroy_session_and_retry_with_backoff",
+                    "instance,session,action_set,actions",
+                )
+            })?;
 
         let left_aim_space = left_aim_action
             .create_space(&xr_session, xr::Path::NULL, xr::Posef::IDENTITY)
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "input_action_space_create",
+                    error,
+                    true,
+                    "destroy_session_and_retry_with_backoff",
+                    "instance,session,action_set,actions",
+                )
+            })?;
         let right_aim_space = right_aim_action
             .create_space(&xr_session, xr::Path::NULL, xr::Posef::IDENTITY)
-            .unwrap();
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "input_action_space_create",
+                    error,
+                    true,
+                    "destroy_session_and_retry_with_backoff",
+                    "instance,session,action_set,actions",
+                )
+            })?;
 
-        let left_detached_grip_space = left_detached_grip_action.as_ref().map(|action| {
+        let left_detached_grip_space = left_detached_grip_action.as_ref().and_then(|action| {
             action
                 .create_space(&xr_session, xr::Path::NULL, xr::Posef::IDENTITY)
-                .unwrap()
+                .map_err(|error| {
+                    warn!("Disabling optional left detached controller: {error}");
+                })
+                .ok()
         });
-        let right_detached_grip_space = right_detached_grip_action.as_ref().map(|action| {
+        let right_detached_grip_space = right_detached_grip_action.as_ref().and_then(|action| {
             action
                 .create_space(&xr_session, xr::Path::NULL, xr::Posef::IDENTITY)
-                .unwrap()
+                .map_err(|error| {
+                    warn!("Disabling optional right detached controller: {error}");
+                })
+                .ok()
         });
 
         let left_hand_tracker = check_ext_object(
@@ -397,13 +585,29 @@ impl InteractionContext {
             if extra_extensions::supports_eye_gaze_interaction(&xr_session, xr_system) {
                 let action = action_set
                     .create_action("combined_eye_gaze", "Combined eye gaze", &[])
-                    .unwrap();
+                    .map_err(|error| {
+                        StageFailure::from_error(
+                            "optional_eye_gaze_action_create",
+                            error,
+                            true,
+                            "disable_optional_eye_gaze_and_continue",
+                            "instance,session,action_set",
+                        )
+                    })?;
 
                 let res = xr_instance.suggest_interaction_profile_bindings(
                     xr_instance
                         .string_to_path("/interaction_profiles/ext/eye_gaze_interaction")
-                        .unwrap(),
-                    &[binding(&action, "/user/eyes_ext/input/gaze_ext/pose")],
+                        .map_err(|error| {
+                            StageFailure::from_error(
+                                "optional_eye_gaze_profile_path",
+                                error,
+                                true,
+                                "disable_optional_eye_gaze_and_continue",
+                                "instance,session,action_set",
+                            )
+                        })?,
+                    &[binding(&action, "/user/eyes_ext/input/gaze_ext/pose")?],
                 );
                 if res.is_err() {
                     warn!("Failed to register combined eye gaze input: {res:?}");
@@ -411,7 +615,15 @@ impl InteractionContext {
 
                 let space = action
                     .create_space(&xr_session, xr::Path::NULL, xr::Posef::IDENTITY)
-                    .unwrap();
+                    .map_err(|error| {
+                        StageFailure::from_error(
+                            "optional_eye_gaze_space_create",
+                            error,
+                            true,
+                            "disable_optional_eye_gaze_and_continue",
+                            "instance,session,action_set",
+                        )
+                    })?;
 
                 Some((action, space))
             } else {
@@ -442,9 +654,19 @@ impl InteractionContext {
             None
         };
 
-        xr_session.attach_action_sets(&[&action_set]).unwrap();
+        xr_session
+            .attach_action_sets(&[&action_set])
+            .map_err(|error| {
+                StageFailure::from_error(
+                    "input_action_set_attach",
+                    error,
+                    true,
+                    "destroy_session_and_retry_with_backoff",
+                    "instance,session,action_set,actions,spaces",
+                )
+            })?;
 
-        Self {
+        Ok(Self {
             xr_session,
             xr_system,
             extra_extensions,
@@ -487,7 +709,7 @@ impl InteractionContext {
                 face_expressions_tracker,
             },
             body_source: None,
-        }
+        })
     }
 
     pub fn select_sources(&mut self, config: &InteractionSourcesConfig) {
@@ -654,10 +876,8 @@ impl InteractionContext {
 pub fn get_reference_space(
     xr_session: &xr::Session<xr::OpenGlEs>,
     ty: xr::ReferenceSpaceType,
-) -> xr::Space {
-    xr_session
-        .create_reference_space(ty, xr::Posef::IDENTITY)
-        .unwrap()
+) -> xr::Result<xr::Space> {
+    xr_session.create_reference_space(ty, xr::Posef::IDENTITY)
 }
 
 pub fn get_head_data(
@@ -846,11 +1066,8 @@ pub fn get_hand_data(
         && detached_grip_action
             .is_active(xr_session, xr::Path::NULL)
             .unwrap_or(false)
-        && let Ok((location, velocity)) = hand_source
-            .detached_grip_space
-            .as_ref()
-            .unwrap()
-            .relate(reference_space, xr_time)
+        && let Some(detached_grip_space) = hand_source.detached_grip_space.as_ref()
+        && let Ok((location, velocity)) = detached_grip_space.relate(reference_space, xr_time)
     {
         if location
             .location_flags
@@ -895,12 +1112,18 @@ pub fn get_hand_data(
             last_palm_pose.position = crate::from_xr_vec3(joint_locations[0].pose.position);
         }
 
-        let mut joints: [_; 26] = joint_locations
+        let joints = joint_locations
             .iter()
             .map(|j| crate::from_xr_pose(j.pose))
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
+            .collect::<Vec<_>>();
+        let Ok(mut joints) = <[_; 26]>::try_from(joints) else {
+            warn!("OpenXR hand tracker returned an unexpected joint count");
+            return HandData {
+                grip_motion,
+                detached_grip_motion,
+                skeleton_joints: None,
+            };
+        };
 
         joints[0] = *last_palm_pose;
 
@@ -1078,9 +1301,11 @@ pub fn get_body_skeleton(
                     .map(|joint| check_and_convert_pose(joint.pose, &joint.location_flags))
                     .collect::<Vec<_>>();
 
+                let upper_body = joints.get(..18)?.try_into().ok()?;
+                let lower_body = joints.get(70..84).and_then(|joints| joints.try_into().ok());
                 Some(BodySkeleton::Fb(Box::new(BodySkeletonFb {
-                    upper_body: joints[..18].try_into().unwrap(),
-                    lower_body: (joints.len() >= 84).then(|| joints[70..84].try_into().unwrap()),
+                    upper_body,
+                    lower_body,
                 })))
             } else {
                 None
@@ -1098,7 +1323,7 @@ pub fn get_body_skeleton(
                     .collect::<Vec<_>>();
 
                 Some(BodySkeleton::Bd(Box::new(BodySkeletonBd(
-                    joints.try_into().unwrap(),
+                    joints.try_into().ok()?,
                 ))))
             } else {
                 None

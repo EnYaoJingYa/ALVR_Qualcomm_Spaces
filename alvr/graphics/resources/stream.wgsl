@@ -12,6 +12,8 @@ override UPSCALE_EDGE_THRESHOLD: f32 = 4.0/255.0;
 override UPSCALE_EDGE_SHARPNESS: f32 = 2.0;
 
 override ENABLE_FFE: bool = false;
+override SOURCE_CROP_X: f32 = 0.0;
+override SOURCE_CROP_Y: f32 = 0.0;
 
 struct PushConstant {
     reprojection_transform: mat4x4f,
@@ -58,7 +60,10 @@ fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fragment_main(@location(0) uv: vec2f) -> @location(0) vec4f {
-    var corrected_uv = uv;
+    var corrected_uv = vec2f(
+        SOURCE_CROP_X + uv.x * (1.0 - 2.0 * SOURCE_CROP_X),
+        SOURCE_CROP_Y + uv.y * (1.0 - 2.0 * SOURCE_CROP_Y),
+    );
     // tell upscaler to target a lower resolution for the edges
     var upscale_source_resolution = 1.0;
     if ENABLE_FFE {

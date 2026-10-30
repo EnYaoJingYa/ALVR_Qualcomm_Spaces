@@ -3,7 +3,7 @@ use alvr_common::{
     RelaxedAtomic, ToAny,
     anyhow::{Context, Result, anyhow, bail},
     error, info,
-    parking_lot::{Condvar, Mutex},
+    parking_lot::Mutex,
     warn,
 };
 use alvr_session::{CodecType, MediacodecPropType};
@@ -18,13 +18,13 @@ use ndk::{
     },
 };
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     ffi::c_void,
     ops::Deref,
     ptr,
-    sync::{Arc, Weak},
+    sync::{Arc, Weak, mpsc},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 struct FakeThreadSafe<T>(T);
@@ -39,9 +39,41 @@ impl<T> Deref for FakeThreadSafe<T> {
     }
 }
 
+static DECODER_WORKER_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+struct DecoderWorkerGuard;
+impl Drop for DecoderWorkerGuard {
+    fn drop(&mut self) {
+        DECODER_WORKER_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 type SharedMediaCodec = Arc<FakeThreadSafe<MediaCodec>>;
 
+type FrameTimings = Arc<Mutex<BTreeMap<Duration, (Instant, Option<Instant>)>>>;
+// Bound the vendor queue while tolerating transient backpressure within one frame.
+const VRX_MAX_DECODER_INPUTS: usize = 3;
+const VRX_INPUT_WAIT_BUDGET: Duration = Duration::from_millis(8);
+
+#[cfg(feature = "vrx-fault-injection")]
+fn injected_failure(stage: &str) -> bool {
+    unsafe extern "C" {
+        fn __system_property_get(
+            name: *const std::ffi::c_char,
+            value: *mut std::ffi::c_char,
+        ) -> i32;
+    }
+    let mut value = [0 as std::ffi::c_char; 92];
+    unsafe {
+        __system_property_get(c"debug.alvr.fail_stage".as_ptr(), value.as_mut_ptr());
+        std::ffi::CStr::from_ptr(value.as_ptr()).to_bytes() == stage.as_bytes()
+    }
+}
+
 pub struct VideoDecoderSink {
+    immediate_output: bool,
+    codec_timestamps: Arc<Mutex<super::CodecFrameMap>>,
+    timings: FrameTimings,
     inner: Arc<Mutex<Option<SharedMediaCodec>>>,
 }
 
@@ -55,8 +87,32 @@ impl VideoDecoderSink {
             return Ok(false);
         };
 
-        match decoder.dequeue_input_buffer(Duration::ZERO) {
+        let deadline = Instant::now() + VRX_INPUT_WAIT_BUDGET;
+        if self.immediate_output {
+            while self.codec_timestamps.lock().pending() >= VRX_MAX_DECODER_INPUTS {
+                if Instant::now() >= deadline {
+                    warn!("event=decoder_admission_timeout budget_ms=8 action=wait_for_idr");
+                    return Ok(false);
+                }
+                // Do not hold the timestamp lock: the output worker retires pending inputs.
+                thread::sleep(Duration::from_micros(250));
+            }
+        }
+        let input_timeout = if self.immediate_output {
+            deadline.saturating_duration_since(Instant::now())
+        } else {
+            Duration::ZERO
+        };
+        match decoder.dequeue_input_buffer(input_timeout) {
             Ok(DequeuedInputBufferResult::Buffer(mut buffer)) => {
+                if data.len() > buffer.buffer_mut().len() {
+                    // Return the acquired slot before reporting the invalid input.
+                    decoder.queue_input_buffer(buffer, 0, 0, 0, 0)?;
+                    bail!(
+                        "stage=decoder_input code=INPUT_TOO_LARGE retryable=true fallback=reconnect size={}",
+                        data.len()
+                    );
+                }
                 unsafe {
                     ptr::copy_nonoverlapping(
                         data.as_ptr(),
@@ -65,14 +121,33 @@ impl VideoDecoderSink {
                     )
                 };
 
-                // NB: the function expects the timestamp in micros, but nanos is used to have
-                // complete precision, so when converted back to Duration it can compare correctly
-                // to other Durations
-                decoder.queue_input_buffer(buffer, 0, data.len(), timestamp.as_nanos() as _, 0)?;
+                let codec_time = if self.immediate_output {
+                    self.codec_timestamps.lock().insert(timestamp)
+                } else {
+                    let mut timings = self.timings.lock();
+                    if timings.len() >= 256 {
+                        timings.clear();
+                    }
+                    timings.insert(timestamp, (Instant::now(), None));
+                    // Preserve the legacy timestamp convention on other platforms.
+                    timestamp.as_nanos() as i64
+                };
+                if let Err(error) =
+                    decoder.queue_input_buffer(buffer, 0, data.len(), codec_time as _, 0)
+                {
+                    self.codec_timestamps.lock().frames.remove(&codec_time);
+                    self.timings.lock().remove(&timestamp);
+                    return Err(error.into());
+                }
 
                 Ok(true)
             }
-            Ok(DequeuedInputBufferResult::TryAgainLater) => Ok(false),
+            Ok(DequeuedInputBufferResult::TryAgainLater) => {
+                if self.immediate_output {
+                    warn!("event=decoder_input_timeout action=wait_for_idr");
+                }
+                Ok(false)
+            }
             Err(e) => bail!("{e}"),
         }
     }
@@ -97,6 +172,11 @@ pub struct VideoDecoderSource {
 unsafe impl Send for VideoDecoderSource {}
 
 impl VideoDecoderSource {
+    pub fn discard_unused_frames(&mut self) {
+        self.image_queue.lock().retain(|image| image.in_use);
+        self.buffering_running_average = 0.;
+    }
+
     // The application MUST finish using the returned buffer before calling this function again
     pub fn dequeue_frame(&mut self) -> Option<(Duration, *mut c_void)> {
         let mut image_queue_lock = self.image_queue.lock();
@@ -108,26 +188,40 @@ impl VideoDecoderSource {
             image_queue_lock.pop_front();
         }
 
-        // use running average to give more weight to recent samples
-        self.buffering_running_average = self.buffering_running_average
-            * self.config.buffering_history_weight
-            + image_queue_lock.len() as f32 * (1. - self.config.buffering_history_weight);
-        if self.buffering_running_average > self.config.max_buffering_frames as f32 {
-            image_queue_lock.pop_front();
+        if self.config.encoded_resolution.is_some() {
+            // The previous in-use image has been released above. These are already
+            // decoded images, so skipping stale ones cannot break codec references.
+            // Keep the image and its exact tracking timestamp together.
+            while image_queue_lock.len() > 1 {
+                image_queue_lock.pop_front();
+            }
+            self.buffering_running_average = 0.;
+        } else {
+            self.buffering_running_average = self.buffering_running_average
+                * self.config.buffering_history_weight
+                + image_queue_lock.len() as f32 * (1. - self.config.buffering_history_weight);
+            if self.buffering_running_average > self.config.max_buffering_frames as f32 {
+                image_queue_lock.pop_front();
+            }
         }
 
         if let Some(queued_image) = image_queue_lock.front_mut() {
             queued_image.in_use = true;
 
-            Some((
-                queued_image.timestamp,
-                queued_image
-                    .image
-                    .hardware_buffer()
-                    .unwrap()
-                    .as_ptr()
-                    .cast(),
-            ))
+            match queued_image.image.hardware_buffer() {
+                Ok(hardware_buffer) => {
+                    Some((queued_image.timestamp, hardware_buffer.as_ptr().cast()))
+                }
+                Err(error) => {
+                    error!(
+                        "event=decoder_stage_failed stage=decoder_get_hardware_buffer \
+                        fallback=drop_frame detail={error}"
+                    );
+                    queued_image.in_use = false;
+                    image_queue_lock.pop_front();
+                    None
+                }
+            }
         } else {
             // TODO: add back when implementing proper phase sync
             //warn!("Video frame queue underflow!");
@@ -196,26 +290,66 @@ fn decoder_lifecycle(
     frame_result_callback: Weak<impl Fn(Result<Duration>) + Send + Sync + 'static>,
     running: Arc<RelaxedAtomic>,
     decoder_sink: Arc<Mutex<Option<SharedMediaCodec>>>,
-    decoder_ready_notifier: Arc<Condvar>,
+    decoder_ready: mpsc::Sender<Result<()>>,
     image_queue: Arc<Mutex<VecDeque<QueuedImage>>>,
     image_reader: &mut ImageReader,
+    timings: FrameTimings,
+    codec_timestamps: Arc<Mutex<super::CodecFrameMap>>,
 ) -> Result<()> {
+    #[cfg(feature = "vrx-fault-injection")]
+    if injected_failure("decoder_worker") {
+        bail!("stage=decoder_start code=INJECTED_INIT_FAILURE retryable=true fallback=reconnect");
+    }
     // 2x: keep the target buffering in the middle of the max amount of queuable frames
     let available_buffering_frames = (2. * config.max_buffering_frames).ceil() as usize;
 
     image_reader.set_image_listener(Box::new({
         let image_queue = Arc::clone(&image_queue);
+        let timings = Arc::clone(&timings);
+        let mut sample_count = 0u64;
+        let immediate_output = config.encoded_resolution.is_some();
+        let codec_timestamps = Arc::clone(&codec_timestamps);
         move |image_reader| {
             let mut image_queue_lock = image_queue.lock();
 
             if image_queue_lock.len() > available_buffering_frames {
                 warn!("Video frame queue overflow!");
-                image_queue_lock.pop_front();
+                if let Some(index) = image_queue_lock.iter().position(|image| !image.in_use) {
+                    image_queue_lock.remove(index);
+                }
             }
 
             match image_reader.acquire_next_image() {
                 Ok(AcquireResult::Image(image)) => {
-                    let timestamp = Duration::from_nanos(image.timestamp().unwrap() as u64);
+                    let timestamp_ns = match image.timestamp() {
+                        Ok(timestamp) => timestamp,
+                        Err(error) => {
+                            error!(
+                                "event=decoder_stage_failed stage=decoder_image_timestamp \
+                                fallback=drop_frame detail={error}"
+                            );
+                            return;
+                        }
+                    };
+                    let frame_timing = if immediate_output {
+                        codec_timestamps.lock().frames.remove(&(timestamp_ns / 1000)).map(|frame| (frame.timestamp, Some((frame.input, frame.output))))
+                    } else {
+                        let timestamp = Duration::from_nanos(timestamp_ns as u64);
+                        Some((timestamp, timings.lock().remove(&timestamp)))
+                    };
+                    let Some((timestamp, timing)) = frame_timing else {
+                        warn!("event=decoder_timestamp_unmatched image_ns={timestamp_ns}");
+                        return;
+                    };
+                    sample_count += 1;
+                    if let Some((input, output)) = timing {
+                        if sample_count % 90 == 1 {
+                            info!("event=decoder_latency_sample input_to_image_ms={:.3} input_to_output_ms={:.3} output_to_image_ms={:.3}",
+                                input.elapsed().as_secs_f64() * 1000.,
+                                output.map_or(-1., |t| t.duration_since(input).as_secs_f64() * 1000.),
+                                output.map_or(-1., |t| t.elapsed().as_secs_f64() * 1000.));
+                        }
+                    }
 
                     if let Some(callback) = frame_result_callback.upgrade() {
                         callback(Ok(timestamp));
@@ -230,12 +364,12 @@ fn decoder_lifecycle(
                 Ok(e) => {
                     error!("ImageReader error: {e:?}");
 
-                    image_queue_lock.pop_front();
+                    image_queue_lock.retain(|image| image.in_use);
                 }
                 Err(e) => {
                     error!("ImageReader error: {e}");
 
-                    image_queue_lock.clear();
+                    image_queue_lock.retain(|image| image.in_use);
                 }
             }
         }
@@ -251,8 +385,11 @@ fn decoder_lifecycle(
     format.set_str("mime", mime);
     // Given https://github.com/alvr-org/ALVR/pull/1933#discussion_r1431902906 - change at own risk.
     // It might be harmless, it might not be, but it's definitely a risk.
-    format.set_i32("width", 512);
-    format.set_i32("height", 1024);
+    let resolution = config
+        .encoded_resolution
+        .unwrap_or(alvr_common::glam::UVec2::new(512, 1024));
+    format.set_i32("width", resolution.x as i32);
+    format.set_i32("height", resolution.y as i32);
     format.set_buffer("csd-0", &csd_0);
 
     for (key, prop) in &config.options {
@@ -280,6 +417,9 @@ fn decoder_lifecycle(
         }
     }
 
+    if config.encoded_resolution.is_some() {
+        format.set_i32("low-latency", 1);
+    }
     info!("Using AMediaCodec format:{} ", format);
 
     let decoder = if config.force_software_decoder {
@@ -291,13 +431,25 @@ fn decoder_lifecycle(
             Ok(d) => d,
             Err(e) => {
                 // would be "warn!" but this is a severe caveat and a pretty major error.
-                error!("Attempting software fallback due to error in default decoder: {e:#}");
+                warn!("event=decoder_hardware_setup_failed detail={e:#}");
 
-                decoder_setup(config.codec, true, &format, &image_reader)?
+                if config.encoded_resolution.is_some() {
+                    format.set_i32("low-latency", 0);
+                    warn!(
+                        "event=decoder_optional_feature_disabled feature=low-latency detail={e:#}"
+                    );
+                    decoder_setup(config.codec, false, &format, &image_reader)?
+                } else {
+                    decoder_setup(config.codec, true, &format, &image_reader)?
+                }
             }
         }
     };
 
+    info!(
+        "event=decoder_configured name={}",
+        decoder.name().unwrap_or_else(|_| "unavailable".into())
+    );
     let decoder = Arc::new(FakeThreadSafe(decoder));
 
     {
@@ -305,46 +457,115 @@ fn decoder_lifecycle(
 
         *decoder_lock = Some(Arc::clone(&decoder));
 
-        decoder_ready_notifier.notify_one();
+        if !running.value() || decoder_ready.send(Ok(())).is_err() {
+            decoder_lock.take();
+            decoder.stop()?;
+            bail!("stage=decoder_start code=CANCELLED retryable=true fallback=reconnect");
+        }
     }
 
+    let mut backlog_watchdog = super::BacklogWatchdog::default();
+    let watchdog_epoch = Instant::now();
     let mut error_counter = 0;
-    while running.value() {
-        match decoder.dequeue_output_buffer(Duration::from_millis(1)) {
-            Ok(DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
-                // The buffer timestamp is actually nanoseconds
-                let presentation_time_ns = buffer.info().presentation_time_us();
+    let mut output_count = 0u64;
+    let mut last_output = Instant::now();
+    let runtime_result = (|| -> Result<()> {
+        while running.value() {
+            #[cfg(feature = "vrx-fault-injection")]
+            if output_count >= 5 && injected_failure("decoder_output") {
+                bail!(
+                    "stage=decoder_output code=INJECTED_RUNTIME_FAILURE retryable=true fallback=reconnect"
+                );
+            }
+            if config.encoded_resolution.is_some()
+                && last_output.elapsed() >= Duration::from_secs(2)
+                && codec_timestamps.lock().pending() != 0
+            {
+                bail!(
+                    "stage=decoder_output code=OUTPUT_STALLED retryable=true fallback=reconnect_with_backoff"
+                );
+            }
+            match decoder.dequeue_output_buffer(Duration::from_millis(1)) {
+                Ok(DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
+                    let codec_time = buffer.info().presentation_time_us();
+                    last_output = Instant::now();
+                    let input_age = if config.encoded_resolution.is_some() {
+                        codec_timestamps
+                            .lock()
+                            .frames
+                            .get_mut(&codec_time)
+                            .map(|frame| {
+                                frame.output = Some(Instant::now());
+                                frame.input.elapsed()
+                            })
+                    } else {
+                        timings
+                            .lock()
+                            .get_mut(&Duration::from_nanos(codec_time as u64))
+                            .map(|frame| {
+                                frame.1 = Some(Instant::now());
+                                frame.0.elapsed()
+                            })
+                    };
+                    output_count += 1;
+                    if output_count % 90 == 1 {
+                        info!(
+                            "event=decoder_output_sample frame={} codec_pts_us={}",
+                            output_count,
+                            buffer.info().presentation_time_us()
+                        );
+                    }
+                    // Only the legacy path stores nanoseconds in the codec PTS field.
+                    let presentation_time_ns = buffer.info().presentation_time_us();
 
-                if let Err(e) = decoder.release_output_buffer_at_time(buffer, presentation_time_ns)
-                {
+                    let release_result = if config.encoded_resolution.is_some() {
+                        decoder.release_output_buffer(buffer, true)
+                    } else {
+                        decoder.release_output_buffer_at_time(buffer, presentation_time_ns)
+                    };
+                    if let Err(e) = release_result {
+                        bail!(
+                            "stage=decoder_release code=OUTPUT_RELEASE_FAILED retryable=true fallback=reconnect detail={e}"
+                        );
+                    }
+                    if config.encoded_resolution.is_some()
+                        && input_age.is_some_and(|age| {
+                            backlog_watchdog.expired(watchdog_epoch.elapsed(), age)
+                        })
+                    {
+                        bail!(
+                            "stage=decoder_backlog code=SUSTAINED_BACKLOG retryable=true fallback=reconnect_with_backoff"
+                        );
+                    }
+                }
+                Ok(DequeuedOutputBufferInfoResult::TryAgainLater) => continue,
+                Ok(i) => info!("Decoder dequeue event: {i:?}"),
+                Err(e) => {
                     error!("Decoder dequeue error: {e}");
+
+                    error_counter += 1;
+                    if error_counter > 10 {
+                        bail!("Too many decoder errors: {e}");
+                    }
+
+                    // lessen logcat flood (just in case)
+                    thread::sleep(Duration::from_millis(50));
+
+                    continue;
                 }
             }
-            Ok(DequeuedOutputBufferInfoResult::TryAgainLater) => continue,
-            Ok(i) => info!("Decoder dequeue event: {i:?}"),
-            Err(e) => {
-                error!("Decoder dequeue error: {e}");
 
-                error_counter += 1;
-                if error_counter > 10 {
-                    bail!("Too many decoder errors: {e}");
-                }
-
-                // lessen logcat flood (just in case)
-                thread::sleep(Duration::from_millis(50));
-
-                continue;
-            }
+            error_counter = 0;
         }
 
-        error_counter = 0;
-    }
-
-    // Destroy all resources
+        Ok(())
+    })();
+    // Release MediaCodec even when the output loop reports an error.
     decoder_sink.lock().take(); // Make sure the shared ref is deleted first
-    decoder.stop()?;
+    let stop_result = decoder.stop();
     drop(decoder);
-
+    runtime_result?;
+    stop_result?;
     Ok(())
 }
 
@@ -354,18 +575,37 @@ pub fn video_decoder_split(
     csd_0: Vec<u8>,
     frame_result_callback: impl Fn(Result<Duration>) + Send + Sync + 'static,
 ) -> Result<(VideoDecoderSink, VideoDecoderSource)> {
+    if DECODER_WORKER_ACTIVE
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        bail!(
+            "stage=decoder_start code=PREVIOUS_WORKER_ACTIVE retryable=false fallback=wait_for_cleanup"
+        );
+    }
+    let worker_guard = DecoderWorkerGuard;
     let running = Arc::new(RelaxedAtomic::new(true));
     let decoder_sink = Arc::new(Mutex::new(None::<SharedMediaCodec>));
-    let decoder_ready_notifier = Arc::new(Condvar::new());
+    let (decoder_ready, startup_result) = mpsc::channel();
+    let timings = FrameTimings::default();
+    let codec_timestamps = Arc::new(Mutex::new(super::CodecFrameMap::default()));
     let image_queue = Arc::new(Mutex::new(VecDeque::<QueuedImage>::new()));
 
     let dequeue_thread = thread::spawn({
         let config = config.clone();
         let running = Arc::clone(&running);
         let decoder_sink = Arc::clone(&decoder_sink);
-        let decoder_ready_notifier = Arc::clone(&decoder_ready_notifier);
+        let decoder_ready = decoder_ready.clone();
+        let codec_timestamps = Arc::clone(&codec_timestamps);
+        let timings = Arc::clone(&timings);
         let image_queue = Arc::clone(&image_queue);
         move || {
+            let _worker_guard = worker_guard;
             const MAX_BUFFERING_FRAMES: usize = 10;
             let mut image_reader = match ImageReader::new_with_usage(
                 1,
@@ -376,7 +616,11 @@ pub fn video_decoder_split(
             ) {
                 Ok(reader) => reader,
                 Err(e) => {
-                    frame_result_callback(Err(anyhow!("{e}")));
+                    let detail = format!(
+                        "stage=image_reader code=INIT_FAILED retryable=true fallback=reconnect detail={e}"
+                    );
+                    let _ = decoder_ready.send(Err(anyhow!(detail.clone())));
+                    frame_result_callback(Err(anyhow!(detail)));
                     return;
                 }
             };
@@ -387,31 +631,49 @@ pub fn video_decoder_split(
                 config,
                 csd_0,
                 Arc::downgrade(&frame_result_callback),
-                running,
-                decoder_sink,
-                decoder_ready_notifier,
+                Arc::clone(&running),
+                Arc::clone(&decoder_sink),
+                decoder_ready.clone(),
                 Arc::clone(&image_queue),
                 &mut image_reader,
+                timings,
+                codec_timestamps,
             ) {
-                frame_result_callback(Err(e));
+                decoder_sink.lock().take();
+                let detail = format!(
+                    "stage=decoder_start code=INIT_OR_RUNTIME_FAILED retryable=true fallback=reconnect detail={e:#}"
+                );
+                let _ = decoder_ready.send(Err(anyhow!(detail.clone())));
+                frame_result_callback(Err(anyhow!(detail)));
             }
 
             image_queue.lock().clear();
         }
     });
 
-    // Make sure the decoder is ready: we don't want to try to enqueue frame and lose them, to avoid
-    // image corruption.
-    {
-        let mut decoder_lock = decoder_sink.lock();
-
-        if decoder_lock.is_none() {
-            // No spurious wakeups
-            decoder_ready_notifier.wait(&mut decoder_lock);
+    drop(decoder_ready);
+    match startup_result.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(())) => (),
+        result => {
+            running.set(false);
+            // Completed failure paths are joined. A vendor call that never returns cannot be
+            // forcibly terminated safely; cancellation prevents it publishing a late decoder.
+            if dequeue_thread.is_finished() {
+                let _ = dequeue_thread.join();
+            }
+            return Err(match result {
+                Ok(Err(error)) => error,
+                _ => anyhow!(
+                    "stage=decoder_start code=STARTUP_TIMEOUT retryable=true fallback=reconnect"
+                ),
+            });
         }
     }
 
     let sink = VideoDecoderSink {
+        immediate_output: config.encoded_resolution.is_some(),
+        codec_timestamps,
+        timings,
         inner: decoder_sink,
     };
     let source = VideoDecoderSource {

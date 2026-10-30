@@ -169,6 +169,7 @@ struct Settings {
     bool m_enableBodyTrackingFakeVive = false;
     bool m_bodyTrackingHasLegs = false;
     bool m_useSeparateHandTrackers = false;
+    bool m_centerComposition = false;
 };
 
 extern "C" const unsigned char* FRAME_RENDER_VS_CSO_PTR;

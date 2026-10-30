@@ -218,6 +218,7 @@ fn make_settings(negotiated: Option<&ServerNegotiatedStreamingConfig>) -> Settin
         m_enableBodyTrackingFakeVive: body_tracking_vive_enabled,
         m_bodyTrackingHasLegs: body_tracking_has_legs,
         m_useSeparateHandTrackers: use_separate_hand_trackers,
+        m_centerComposition: negotiated.is_some_and(|n| n.center_composition),
     }
 }
 
