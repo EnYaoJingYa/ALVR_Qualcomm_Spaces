@@ -175,6 +175,10 @@ impl StatisticsManager {
     // Called every frame. Some statistics are reported once every frame
     // Returns (network latency, game time latency)
     pub fn report_statistics(&mut self, client_stats: ClientStatistics) -> (Duration, Duration) {
+        // vsync_queue is measured before the client sends this feedback. Adding it to
+        // the server's receive time would include transport and scheduling delays in
+        // the display phase. Keep nominal pacing until a calibrated clock mapping is
+        // available; feedback timestamps identify video frames, not server deadlines.
         self.motion_to_photon_latency_average
             .submit_sample(client_stats.total_pipeline_latency);
 
@@ -306,5 +310,82 @@ impl StatisticsManager {
         }
 
         (self.last_vsync_time + self.frame_interval).saturating_duration_since(now)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn add_frame(stats: &mut StatisticsManager, timestamp: Duration, acquired: Instant) {
+        stats.history_buffer.push_front(HistoryFrame {
+            target_timestamp: timestamp,
+            tracking_received: acquired,
+            frame_present: acquired + Duration::from_millis(2),
+            frame_composed: acquired + Duration::from_millis(3),
+            frame_encoded: acquired + Duration::from_millis(6),
+            ..Default::default()
+        });
+    }
+
+    fn feedback(timestamp: Duration, display_lead: Duration) -> ClientStatistics {
+        ClientStatistics {
+            target_timestamp: timestamp,
+            frame_interval: Duration::from_millis(10),
+            video_decode: Duration::from_millis(4),
+            video_decoder_queue: Duration::from_millis(1),
+            rendering: Duration::from_millis(1),
+            vsync_queue: display_lead,
+            total_pipeline_latency: Duration::from_millis(20) + display_lead,
+        }
+    }
+
+    #[test]
+    fn uncalibrated_feedback_cannot_shift_the_server_pacing_grid() {
+        let mut stats = StatisticsManager::new(256, Duration::from_millis(10), 0.0);
+        let original_tick = stats.last_vsync_time;
+        let original_interval = stats.frame_interval;
+        // A backlog can deliver many old frames at once. All arrivals may have the
+        // same nonzero transport bias: smoothing must not turn that into a new phase.
+        let acquired = original_tick - Duration::from_secs(1);
+        for i in 1..=128 {
+            let timestamp = Duration::from_millis(i);
+            add_frame(&mut stats, timestamp, acquired);
+            let lead = Duration::from_millis(if i % 2 == 0 { 33 } else { 35 });
+            stats.report_statistics(feedback(timestamp, lead));
+            assert_eq!(stats.last_vsync_time, original_tick);
+            assert_eq!(stats.frame_interval, original_interval);
+        }
+    }
+
+    #[test]
+    fn repeated_and_reordered_feedback_preserves_latency_accounting() {
+        let mut stats = StatisticsManager::new(256, Duration::from_millis(10), 0.0);
+        let original_tick = stats.last_vsync_time;
+        let acquired = original_tick - Duration::from_secs(1);
+        for timestamp_ms in [1, 2] {
+            add_frame(&mut stats, Duration::from_millis(timestamp_ms), acquired);
+        }
+        for timestamp_ms in [2, 2, 1, 2] {
+            let timestamp = Duration::from_millis(timestamp_ms);
+            for lead_ms in [30, 32, 60] {
+                let latencies =
+                    stats.report_statistics(feedback(timestamp, Duration::from_millis(lead_ms)));
+                assert_eq!(
+                    latencies,
+                    (Duration::from_millis(8), Duration::from_millis(2))
+                );
+                assert_eq!(stats.last_vsync_time, original_tick);
+                assert_eq!(
+                    stats
+                        .history_buffer
+                        .iter()
+                        .find(|frame| frame.target_timestamp == timestamp)
+                        .unwrap()
+                        .total_pipeline_latency,
+                    Duration::from_millis(20 + lead_ms)
+                );
+            }
+        }
     }
 }

@@ -1,4 +1,5 @@
 mod c_api;
+mod display_timing;
 mod extra_extensions;
 mod graphics;
 mod interaction;

@@ -1,5 +1,6 @@
 use crate::{
     StageFailure,
+    display_timing::select_display_time,
     graphics::{self, ProjectionLayerAlphaConfig, ProjectionLayerBuilder},
     interaction::{self, InteractionContext, InteractionSourcesConfig},
 };
@@ -638,12 +639,14 @@ impl StreamContext {
         // altered FoVs based on settings and view conversions done for canting.
         let input_view_params = view_params;
         let mut output_view_params = input_view_params;
-        // Avoid passing invalid timestamp to runtime.
-        // `timestamp` is generally a current vsync time, but may be repeated if frames are
-        // dropped. Some runtimes dislike it if the timestamp is repeated for too long, so after
-        // one second we begin presenting a lagged vsync time instead.
-        let mut openxr_display_time =
-            Duration::max(timestamp, vsync_time.saturating_sub(Duration::from_secs(1)));
+        // Keep the source image's pose and FoV for reprojection, but schedule VRX
+        // against this Runtime frame's display deadline, including repeated video.
+        let openxr_display_time = select_display_time(
+            self.core_context.platform() == Platform::ThinkRealityVRX,
+            timestamp,
+            vsync_time,
+            self.use_custom_reprojection,
+        );
 
         // (shinyquagsire23) I don't entirely trust runtimes to implement CompositionLayerProjectionView
         // correctly, but if we do trust them, avoid doing rotation ourselves. Otherwise, rerender.
@@ -659,8 +662,6 @@ impl StreamContext {
                     fov: crate::from_xr_fov(current_headset_views[1].fov),
                 },
             ];
-
-            openxr_display_time = vsync_time;
         }
 
         self.renderer

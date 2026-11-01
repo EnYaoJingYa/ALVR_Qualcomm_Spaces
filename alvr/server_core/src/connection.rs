@@ -1023,6 +1023,11 @@ fn connection_pipeline(
             0.0
         },
     ));
+    if streaming_platform == Platform::ThinkRealityVRX {
+        info!(
+            "event=vrx_server_phase_sync state=disabled code=clock_mapping_unavailable fallback=nominal_frame_pacing"
+        );
+    }
     *ctx.bitrate_manager.lock() =
         BitrateManager::new(initial_settings.video.bitrate.history_size, fps);
     *ctx.tracking_manager.write() =
