@@ -9,8 +9,16 @@ use eframe::{
 use serde_json as json;
 use std::collections::HashMap;
 
+// An unmatched dropdown has a placeholder before the actual variants. Never
+// treat its UI index as a variant index or send the placeholder as a setting.
+fn unmatched_dropdown_variant(labels: &[DisplayString], index: usize) -> Option<&str> {
+    labels
+        .get(index.checked_sub(1)?)
+        .map(|label| label.id.as_str())
+}
+
 fn get_display_name(id: &str, strings: &HashMap<String, String>) -> String {
-    strings.get("display_name").cloned().unwrap_or_else(|| {
+    let display = strings.get("display_name").cloned().unwrap_or_else(|| {
         let mut chars = id.chars();
 
         let mut new_chars = vec![chars.next().unwrap()];
@@ -25,7 +33,8 @@ fn get_display_name(id: &str, strings: &HashMap<String, String>) -> String {
         }
 
         new_chars.into_iter().collect::<String>()
-    })
+    });
+    alvr_gui_common::zh_cn::text(&display)
 }
 
 pub struct Control {
@@ -148,14 +157,16 @@ impl Control {
                     self.variant_labels.len() + 1,
                     |idx| {
                         if idx == 0 {
-                            "Preset not applied".into()
+                            "当前设置未匹配预设".into()
                         } else {
                             self.variant_labels[idx - 1].display.clone()
                         }
                     },
                 );
-                if response.changed() {
-                    variant_mut.clone_from(&self.variant_labels[index].id);
+                if response.changed()
+                    && let Some(variant) = unmatched_dropdown_variant(&self.variant_labels, index)
+                {
+                    *variant_mut = variant.to_owned();
                     request = get_request(&self.nesting_info, variant_mut);
                 }
             }
@@ -184,5 +195,35 @@ impl Control {
         }
 
         request
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unmatched_preset_dropdown_maps_first_and_last_to_internal_ids() {
+        let labels = vec![
+            DisplayString {
+                id: "Very Low (width: 3072)".into(),
+                display: "极低".into(),
+            },
+            DisplayString {
+                id: "ThinkReality VRX".into(),
+                display: "ThinkReality VRX（原生）".into(),
+            },
+        ];
+        assert_eq!(unmatched_dropdown_variant(&labels, 0), None);
+        assert_eq!(
+            unmatched_dropdown_variant(&labels, 1),
+            Some("Very Low (width: 3072)")
+        );
+        assert_eq!(
+            unmatched_dropdown_variant(&labels, 2),
+            Some("ThinkReality VRX")
+        );
+        assert_eq!(unmatched_dropdown_variant(&labels, 3), None);
+        assert_eq!(unmatched_dropdown_variant(&[], 1), None);
     }
 }

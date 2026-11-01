@@ -66,7 +66,7 @@ fn main() {
     }
 
     eframe::run_native(
-        "ALVR Launcher",
+        "ALVR 启动器",
         eframe::NativeOptions {
             viewport: ViewportBuilder::default()
                 .with_app_id("alvr.launcher")

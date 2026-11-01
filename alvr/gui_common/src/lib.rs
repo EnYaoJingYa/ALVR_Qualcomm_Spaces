@@ -1,5 +1,6 @@
 mod basic_components;
 pub mod theme;
+pub mod zh_cn;
 
 pub use basic_components::*;
 

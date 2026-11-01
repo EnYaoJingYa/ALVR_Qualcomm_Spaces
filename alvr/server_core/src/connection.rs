@@ -64,6 +64,10 @@ fn align16(value: f32) -> u32 {
     ((value / 16.).floor() * 16.) as u32
 }
 
+fn vrx_codec_surface(resolution: UVec2) -> UVec2 {
+    (resolution + UVec2::splat(31)) / 32 * 32
+}
+
 fn platform_view_resolution(platform: Platform, resolution: Vec2) -> UVec2 {
     match platform {
         // The VRX visible and encoded resolutions are intentionally selected
@@ -89,9 +93,18 @@ fn streaming_platform(platform: &str) -> Platform {
 
 #[cfg(test)]
 mod resolution_tests {
-    use super::platform_view_resolution;
+    use super::{platform_view_resolution, vrx_codec_surface};
     use alvr_common::glam::Vec2;
     use alvr_system_info::Platform;
+
+    #[test]
+    fn vrx_custom_codec_surface_aligns_up_without_forcing_native() {
+        use alvr_common::glam::UVec2;
+        for (requested, expected) in [(1440, 1440), (1856, 1856), (2000, 2016),
+            (2144, 2144), (2280, 2304), (2304, 2304)] {
+            assert_eq!(vrx_codec_surface(UVec2::splat(requested)), UVec2::splat(expected));
+        }
+    }
 
     #[test]
     fn keeps_quest3_native_horizontal_resolution() {
@@ -730,10 +743,11 @@ fn connection_pipeline(
     }
 
     if streaming_platform == Platform::ThinkRealityVRX {
-        transcoding_view_resolution = alvr_system_info::VRX_ENCODED_EYE_RESOLUTION;
+        // Keep custom settings effective; only the codec surface needs alignment.
+        transcoding_view_resolution = vrx_codec_surface(transcoding_view_resolution);
     }
 
-    let mut emulated_headset_view_resolution = get_view_res(
+    let emulated_headset_view_resolution = get_view_res(
         streaming_platform,
         initial_settings
             .video
@@ -743,7 +757,11 @@ fn connection_pipeline(
     );
 
     if streaming_platform == Platform::ThinkRealityVRX {
-        emulated_headset_view_resolution = alvr_system_info::VRX_VISIBLE_EYE_RESOLUTION;
+        if transcoding_view_resolution.min_element() == 0
+            || emulated_headset_view_resolution.min_element() == 0
+        {
+            con_bail!("VRX render and encoding resolutions must be nonzero");
+        }
         if !matches!(
             initial_settings.headset.emulation_mode,
             alvr_session::HeadsetEmulationMode::ThinkRealityVRX
@@ -1537,7 +1555,9 @@ fn connection_pipeline(
     ctx.events_sender
         .send(ServerCoreEvent::ClientConnected(
             ServerNegotiatedStreamingConfig {
-                center_composition: streaming_platform == Platform::ThinkRealityVRX,
+                center_composition: streaming_platform == Platform::ThinkRealityVRX
+                    && transcoding_view_resolution == alvr_system_info::VRX_ENCODED_EYE_RESOLUTION
+                    && emulated_headset_view_resolution == alvr_system_info::VRX_VISIBLE_EYE_RESOLUTION,
                 transcoding_view_resolution,
                 emulated_headset_view_resolution,
                 refresh_rate: fps as _,

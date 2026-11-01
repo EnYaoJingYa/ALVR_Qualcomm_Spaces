@@ -36,6 +36,7 @@ impl Control {
         gui: NumericGuiType,
         suffix: Option<String>,
     ) -> Self {
+        let suffix = suffix.map(|s| alvr_gui_common::zh_cn::text(&s));
         let default_string = format!("{default}{}", suffix.clone().unwrap_or_default());
 
         Self {

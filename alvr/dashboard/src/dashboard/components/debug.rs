@@ -5,20 +5,19 @@ pub fn debug_tab_ui(ui: &mut Ui) -> Option<ServerRequest> {
     let mut request = None;
 
     ui.label(
-        "Recording from ALVR using the buttons below is not suitable for capturing gameplay.
-For that, use other means of recording, for example through headset or desktop VR output.",
+        "使用下方按钮进行的 ALVR 录制不适合录制游戏画面。\n录制游戏请使用其他方式，例如通过头显或桌面 VR 输出录制。",
     );
 
     ui.columns(3, |ui| {
-        if ui[0].button("Insert IDR").clicked() {
+        if ui[0].button("请求 IDR 关键帧").clicked() {
             request = Some(ServerRequest::InsertIdr);
         }
 
-        if ui[1].button("Start recording").clicked() {
+        if ui[1].button("开始录制").clicked() {
             request = Some(ServerRequest::StartRecording);
         }
 
-        if ui[2].button("Stop recording").clicked() {
+        if ui[2].button("停止录制").clicked() {
             request = Some(ServerRequest::StopRecording);
         }
     });

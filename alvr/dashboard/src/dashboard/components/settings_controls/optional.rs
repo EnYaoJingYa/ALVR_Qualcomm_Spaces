@@ -17,9 +17,9 @@ pub struct Control {
 impl Control {
     pub fn new(nesting_info: NestingInfo, default_set: bool, schema_content: SchemaNode) -> Self {
         let default_string = if default_set {
-            "Set".into()
+            "设置".into()
         } else {
-            "Default".into()
+            "默认".into()
         };
 
         let control = {
@@ -58,8 +58,8 @@ impl Control {
         }
 
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-            if ui.selectable_value(set_mut, false, "Default").clicked()
-                || ui.selectable_value(set_mut, true, "Set").clicked()
+            if ui.selectable_value(set_mut, false, "默认").clicked()
+                || ui.selectable_value(set_mut, true, "设置").clicked()
             {
                 request = get_request(&self.nesting_info, *set_mut);
             }

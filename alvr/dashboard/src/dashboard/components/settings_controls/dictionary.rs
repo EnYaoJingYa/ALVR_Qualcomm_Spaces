@@ -72,7 +72,7 @@ impl Control {
                     &mut request,
                 );
 
-                if reset::reset_button(ui, true, "default list").clicked() {
+                if reset::reset_button(ui, true, "默认列表").clicked() {
                     request = get_content_request(&self.nesting_info, self.default.clone())
                 }
 
@@ -180,7 +180,7 @@ impl Control {
             }
 
             ui.label(" ");
-            if ui.button("Add entry").clicked() {
+            if ui.button("添加条目").clicked() {
                 let mut session_content =
                     session_fragment["content"].as_array_mut().unwrap().clone();
                 session_content.push(json::Value::Array(vec![

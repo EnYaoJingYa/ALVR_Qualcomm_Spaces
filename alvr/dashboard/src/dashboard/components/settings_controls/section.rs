@@ -40,8 +40,14 @@ impl Control {
             .map(|entry| {
                 let id = entry.name;
                 let display = super::get_display_name(&id, &entry.strings);
-                let help = entry.strings.get("help").cloned();
-                let notice = entry.strings.get("notice").cloned();
+                let help = entry
+                    .strings
+                    .get("help")
+                    .map(|s| alvr_gui_common::zh_cn::text(s));
+                let notice = entry
+                    .strings
+                    .get("notice")
+                    .map(|s| alvr_gui_common::zh_cn::text(s));
                 let hidden = entry.flags.contains("hidden");
                 let steamvr_restart_flag = entry.flags.contains("steamvr-restart");
                 let real_time_flag = entry.flags.contains("real-time");
@@ -121,15 +127,13 @@ impl Control {
                     if entry.steamvr_restart_flag {
                         ui.colored_label(WARNING_LIGHT, "⚠")
                             .on_hover_text_at_pointer(
-                                "Changing this setting will make SteamVR restart!\n\
-                                Please save your in-game progress first",
+                                "更改此设置会重启 SteamVR！请先保存游戏进度。",
                             );
                     }
                     if entry.real_time_flag {
                         // The emoji is blue but it will be green in the UI
-                        ui.colored_label(OK_GREEN, "🔵").on_hover_text_at_pointer(
-                            "This setting can be changed in real-time during streaming!",
-                        );
+                        ui.colored_label(OK_GREEN, "🔵")
+                            .on_hover_text_at_pointer("此设置可在串流期间实时更改！");
                     }
                 });
 

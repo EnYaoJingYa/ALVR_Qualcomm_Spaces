@@ -1,0 +1,94 @@
+{
+  "jsonid": "input_profile",
+  "controller_type": "alvr_vrx_controller",
+  "device_class": "TrackedDeviceClass_Controller",
+  "resource_root": "alvr_server",
+  "driver_name": "alvr_server",
+  "remapping": "{alvr_server}/input/alvr_vrx_controller_remapping.json",
+  "input_bindingui_mode": "controller_handed",
+  "should_show_binding_errors": true,
+  "default_bindings": [
+    {
+      "app_key": "steam.app.438100",
+      "binding_url": "bindings/steam.app.438100_alvr_vrx_controller.json"
+    }
+  ],
+  "input_bindingui_left": {
+    "image": "{alvr_server}/icons/alvr_vrx_binding_left.svg",
+    "transform": ""
+  },
+  "input_bindingui_right": {
+    "image": "{alvr_server}/icons/alvr_vrx_binding_right.svg",
+    "transform": ""
+  },
+  "input_source": {
+    "/input/joystick": {
+      "type": "joystick", "click": true, "touch": true,
+      "binding_image_point": [50, 42], "order": 2
+    },
+    "/input/trigger": {
+      "type": "trigger", "value": true, "touch": true,
+      "binding_image_point": [25, 90], "order": 1
+    },
+    "/input/grip": {
+      "type": "trigger", "value": true,
+      "binding_image_point": [85, 105], "order": 3
+    },
+    "/input/a": {
+      "type": "button", "side": "right", "click": true, "touch": true,
+      "binding_image_point": [75, 60], "order": 4
+    },
+    "/input/b": {
+      "type": "button", "side": "right", "click": true, "touch": true,
+      "binding_image_point": [92, 40], "order": 5
+    },
+    "/input/x": {
+      "type": "button", "side": "left", "click": true, "touch": true,
+      "binding_image_point": [75, 60], "order": 4
+    },
+    "/input/y": {
+      "type": "button", "side": "left", "click": true, "touch": true,
+      "binding_image_point": [92, 40], "order": 5
+    },
+    "/input/application_menu": {
+      "type": "button", "side": "left", "click": true,
+      "binding_image_point": [60, 73], "order": 6
+    },
+    "/input/system": {
+      "type": "button", "side": "left", "click": true,
+      "binding_image_point": [60, 73], "order": 7
+    },
+    "/input/skeleton/right": {
+      "type": "skeleton", "side": "right", "skeleton": "/skeleton/hand/right",
+      "binding_image_point": [60, 130], "order": 10
+    },
+    "/input/skeleton/left": {
+      "type": "skeleton", "side": "left", "skeleton": "/skeleton/hand/left",
+      "binding_image_point": [60, 130], "order": 10
+    },
+    "/output/haptic": {
+      "type": "vibration", "binding_image_point": [60, 110], "order": 8
+    },
+    "/pose/raw": {
+      "type": "pose", "binding_image_point": [60, 90], "order": 9
+    },
+    "/pose/base": {
+      "type": "pose", "binding_image_point": [60, 150], "order": 11
+    },
+    "/pose/handgrip": {
+      "type": "pose", "binding_image_point": [60, 110], "order": 12
+    },
+    "/pose/grip": {
+      "type": "pose", "binding_image_point": [60, 90], "order": 12
+    },
+    "/pose/openxr_grip": {
+      "type": "pose", "binding_image_point": [60, 90], "order": 12
+    },
+    "/pose/tip": {
+      "type": "pose", "binding_image_point": [60, 20], "order": 13
+    },
+    "/pose/openxr_aim": {
+      "type": "pose", "binding_image_point": [60, 20], "order": 13
+    }
+  }
+}

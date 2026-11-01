@@ -103,9 +103,7 @@ pub struct HandInteraction {
     pub grip_action: xr::Action<xr::Posef>,
     pub grip_space: xr::Space,
 
-    #[expect(dead_code)]
     pub aim_action: xr::Action<xr::Posef>,
-    #[expect(dead_code)]
     pub aim_space: xr::Space,
 
     pub detached_grip_action: Option<xr::Action<xr::Posef>>,

@@ -19,7 +19,7 @@ use alvr_graphics::{GraphicsContext, StreamRenderer, StreamViewParams};
 use alvr_packets::{ClientStreamConfig, RealTimeConfig, TrackingData};
 use alvr_session::{
     ClientsideFoveationConfig, ClientsideFoveationMode, ClientsidePostProcessingConfig, CodecType,
-    MediacodecProperty, PassthroughMode, UpscalingConfig, VrxGraphicsBackend,
+    FrameSize, MediacodecProperty, PassthroughMode, UpscalingConfig, VrxGraphicsBackend,
 };
 use alvr_system_info::Platform;
 use openxr as xr;
@@ -34,8 +34,19 @@ use std::{
 const DECODER_MAX_TIMEOUT_MULTIPLIER: f32 = 0.8;
 use alvr_system_info::{VRX_ENCODED_EYE_RESOLUTION, VRX_VISIBLE_EYE_RESOLUTION};
 
+fn vrx_native_padding(surface: UVec2, render: &FrameSize) -> bool {
+    let render = match render {
+        FrameSize::Scale(scale) => (VRX_VISIBLE_EYE_RESOLUTION.as_vec2() * *scale)
+            .round()
+            .as_uvec2(),
+        FrameSize::Absolute { width, height } => UVec2::new(*width, height.unwrap_or(*width)),
+    };
+    surface == VRX_ENCODED_EYE_RESOLUTION && render == VRX_VISIBLE_EYE_RESOLUTION
+}
+
 pub struct ParsedStreamConfig {
     pub view_resolution: UVec2,
+    pub vrx_native_padding: bool,
     pub refresh_rate_hint: f32,
     pub encoding_gamma: f32,
     pub enable_hdr: bool,
@@ -60,6 +71,10 @@ impl ParsedStreamConfig {
     pub fn new(config: &ClientStreamConfig) -> Self {
         Self {
             view_resolution: config.negotiated_config.view_resolution,
+            vrx_native_padding: vrx_native_padding(
+                config.negotiated_config.view_resolution,
+                &config.settings.video.emulated_headset_view_resolution,
+            ),
             refresh_rate_hint: config.negotiated_config.refresh_rate_hint,
             encoding_gamma: config.negotiated_config.encoding_gamma,
             enable_hdr: config.negotiated_config.enable_hdr,
@@ -207,16 +222,15 @@ impl StreamContext {
         } else {
             alvr_graphics::compute_target_view_resolution(config.view_resolution, &config.upscaling)
         };
-        let source_crop_uv = if core_ctx.platform() == Platform::ThinkRealityVRX
-            && config.view_resolution == VRX_ENCODED_EYE_RESOLUTION
-        {
-            Vec2::splat(
-                (VRX_ENCODED_EYE_RESOLUTION.x - VRX_VISIBLE_EYE_RESOLUTION.x) as f32
-                    / (2.0 * VRX_ENCODED_EYE_RESOLUTION.x as f32),
-            )
-        } else {
-            Vec2::ZERO
-        };
+        let source_crop_uv =
+            if core_ctx.platform() == Platform::ThinkRealityVRX && config.vrx_native_padding {
+                Vec2::splat(
+                    (VRX_ENCODED_EYE_RESOLUTION.x - VRX_VISIBLE_EYE_RESOLUTION.x) as f32
+                        / (2.0 * VRX_ENCODED_EYE_RESOLUTION.x as f32),
+                )
+            } else {
+                Vec2::ZERO
+            };
         let format = graphics::swapchain_format(&gfx_ctx, &xr_session, config.enable_hdr).map_err(
             |error| {
                 StageFailure::from_error(
@@ -785,6 +799,7 @@ fn stream_input_loop(
     let mut last_controller_poses = [Pose::IDENTITY; 2];
     let mut last_palm_poses = [Pose::IDENTITY; 2];
     let mut last_view_params = [ViewParams::DUMMY; 2];
+    let mut controller_pose_relation_logged = [false; 2];
 
     let mut deadline = Instant::now();
     let frame_interval = Duration::from_secs_f32(1.0 / refresh_rate);
@@ -847,6 +862,46 @@ fn stream_input_loop(
             &mut last_controller_poses[1],
             &mut last_palm_poses[1],
         );
+
+        // Measure the runtime's grip-to-aim transform rather than assuming the
+        // coordinate system of Lenovo's original PC streaming driver. Only two
+        // samples are logged per stream; tracking packets and poses are unchanged.
+        if core_ctx.platform() == Platform::ThinkRealityVRX {
+            for (index, hand) in int_ctx.hands_interaction.iter().enumerate() {
+                if !controller_pose_relation_logged[index]
+                    && hand
+                        .grip_action
+                        .is_active(&xr_session, xr::Path::NULL)
+                        .unwrap_or(false)
+                    && hand
+                        .aim_action
+                        .is_active(&xr_session, xr::Path::NULL)
+                        .unwrap_or(false)
+                    && let Ok(location) = hand
+                        .aim_space
+                        .locate(&hand.grip_space, crate::to_xr_time(now))
+                    && location.location_flags.contains(
+                        xr::SpaceLocationFlags::ORIENTATION_VALID
+                            | xr::SpaceLocationFlags::POSITION_VALID,
+                    )
+                {
+                    let p = location.pose.position;
+                    let q = location.pose.orientation;
+                    alvr_common::info!(
+                        "event=vrx_controller_pose_relation hand={} translation_m=[{:.6},{:.6},{:.6}] orientation_xyzw=[{:.6},{:.6},{:.6},{:.6}]",
+                        if index == 0 { "left" } else { "right" },
+                        p.x,
+                        p.y,
+                        p.z,
+                        q.x,
+                        q.y,
+                        q.z,
+                        q.w,
+                    );
+                    controller_pose_relation_logged[index] = true;
+                }
+            }
+        }
 
         // Note: When multimodal input is enabled, we are sure that when free hands are used
         // (not holding controllers) the controller data is None.
@@ -947,6 +1002,31 @@ fn encoded_view_resolution(
 #[cfg(test)]
 mod refresh_tests {
     use super::*;
+    #[test]
+    fn custom_vrx_resolutions_do_not_inherit_native_crop() {
+        let native = FrameSize::Absolute {
+            width: 2280,
+            height: Some(2280),
+        };
+        assert!(vrx_native_padding(UVec2::splat(2304), &native));
+        assert!(vrx_native_padding(
+            UVec2::splat(2304),
+            &FrameSize::Scale(1.0)
+        ));
+        assert!(!vrx_native_padding(UVec2::splat(1920), &native));
+        assert!(!vrx_native_padding(
+            UVec2::splat(2304),
+            &FrameSize::Absolute {
+                width: 1920,
+                height: None
+            }
+        ));
+        assert!(!vrx_native_padding(
+            UVec2::splat(2304),
+            &FrameSize::Scale(0.8)
+        ));
+    }
+
     #[test]
     fn decoder_uses_compressed_dimensions_without_changing_eye_target() {
         let full = VRX_ENCODED_EYE_RESOLUTION;

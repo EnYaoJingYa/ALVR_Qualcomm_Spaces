@@ -22,6 +22,37 @@ fn copy_dir_contents(source: &std::path::Path, destination: &std::path::Path) {
     }
 }
 
+fn set_vrx_model_poses(model: &mut serde_json::Value) {
+    // The public client sends OpenXR grip poses unchanged for VRX. Therefore
+    // openxr_grip is identity. The aim transform was measured with xrLocateSpace
+    // on both PS0012P0 controllers, not borrowed from a different controller.
+    let poses: serde_json::Value =
+        serde_json::from_str(include_str!("../resources/vrx_controller_poses.json")).unwrap();
+    let components = model["components"]
+        .as_object_mut()
+        .expect("VRX model components");
+    for (name, pose) in poses.as_object().unwrap() {
+        components.insert(name.clone(), pose.clone());
+    }
+}
+
+fn sync_vrx_model_poses(resources: &std::path::Path) {
+    for side in ["left", "right"] {
+        let name = format!("alvr_vrx_controller_{side}");
+        let path = resources
+            .join("rendermodels")
+            .join(&name)
+            .join(format!("{name}.json"));
+        // Lenovo meshes remain an optional, private local asset bundle.
+        if !path.exists() {
+            continue;
+        }
+        let mut model = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        set_vrx_model_poses(&mut model);
+        fs::write(&path, serde_json::to_vec_pretty(&model).unwrap()).unwrap();
+    }
+}
+
 pub fn sync_spaces_openxr_loader(source: PathBuf) {
     // Keep the VRX client on the public Snapdragon Spaces loader. The SDK is
     // stored outside this repository so the loader is not duplicated in Git.
@@ -37,6 +68,144 @@ pub fn sync_spaces_openxr_loader(source: PathBuf) {
     fs::create_dir_all(destination.parent().unwrap()).unwrap();
     if !destination.is_file() || fs::read(&source).unwrap() != fs::read(&destination).unwrap() {
         fs::copy(&source, &destination).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod vrx_input_tests {
+    use serde_json::Value;
+    use std::path::Path;
+
+    #[test]
+    fn vrx_pose_installation_preserves_meshes_and_animations() {
+        let mut model = serde_json::json!({"thumbnail": "local.png", "components": {
+            "body": {"filename": "body.obj", "component_local": {"origin": [0, 0, 0]}},
+            "trigger": {"filename": "trigger.obj", "motion": {"trigger_path": "/input/trigger"}},
+            "tip": {"component_local": {"origin": [0, 0, 0]}},
+            "handgrip": {"component_local": {"origin": [0, 0, 0.025]}}
+        }});
+        let original = model.clone();
+        super::set_vrx_model_poses(&mut model);
+        assert_eq!(model["components"]["body"], original["components"]["body"]);
+        assert_eq!(
+            model["components"]["trigger"],
+            original["components"]["trigger"]
+        );
+        assert_eq!(
+            model["components"]["handgrip"],
+            original["components"]["handgrip"]
+        );
+        assert_eq!(model["thumbnail"], original["thumbnail"]);
+        assert_eq!(
+            model["components"]["tip"],
+            original["components"]["tip"]
+        );
+        assert_eq!(
+            model["components"]["openxr_grip"]["component_local"]["origin"],
+            serde_json::json!([0.0, 0.0, 0.0])
+        );
+        let once = model.clone();
+        super::set_vrx_model_poses(&mut model);
+        assert_eq!(model, once);
+    }
+
+    #[test]
+    fn native_vrx_bindings_never_request_device_simulation() {
+        let profile: Value = serde_json::from_str(include_str!(
+            "../resources/vrx/input/alvr_vrx_controller_profile.json"
+        ))
+        .unwrap();
+        let remapping: Value = serde_json::from_str(include_str!(
+            "../resources/vrx/input/alvr_vrx_controller_remapping.json"
+        ))
+        .unwrap();
+        assert_eq!(profile["controller_type"], "alvr_vrx_controller");
+        assert!(profile.get("compatibility_mode_controller_type").is_none());
+        assert_eq!(remapping["to_controller_type"], profile["controller_type"]);
+        for layout in remapping["layouts"].as_array().unwrap() {
+            for key in [
+                "simulate_controller_type",
+                "simulate_render_model",
+                "simulate_HMD",
+            ] {
+                assert_eq!(layout[key], false, "{key} must be explicitly disabled");
+            }
+            // Every non-deleted destination must exist in the native profile,
+            // including the mirrored pose and button paths.
+            for entry in layout["autoremappings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .chain(layout["remappings"].as_array().into_iter().flatten())
+            {
+                if entry["remapping_mode"] == "delete" {
+                    continue;
+                }
+                let to = entry["to"]
+                    .as_str()
+                    .or_else(|| entry["to"]["path"].as_str())
+                    .unwrap();
+                let component = to.strip_prefix("/user/hand/right").unwrap();
+                assert!(profile["input_source"].get(component).is_some(), "{to}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_vrx_binding_editor_resources_are_complete() {
+        let resources = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/vrx");
+        let profile: Value = serde_json::from_str(include_str!(
+            "../resources/vrx/input/alvr_vrx_controller_profile.json"
+        ))
+        .unwrap();
+        for side in ["left", "right"] {
+            let image = &profile[format!("input_bindingui_{side}")];
+            assert!(image["transform"].is_string());
+            let path = image["image"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("{alvr_server}/")
+                .unwrap();
+            assert!(resources.join(path).is_file());
+        }
+        for (path, component) in profile["input_source"].as_object().unwrap() {
+            let point = component["binding_image_point"].as_array().unwrap();
+            assert_eq!(point.len(), 2, "{path}");
+            assert!(point.iter().all(Value::is_number), "{path}");
+        }
+    }
+
+    #[test]
+    fn vrchat_native_binding_uses_valid_vrx_inputs_and_calibrated_aim() {
+        let profile: Value = serde_json::from_str(include_str!(
+            "../resources/vrx/input/alvr_vrx_controller_profile.json"
+        ))
+        .unwrap();
+        let binding: Value = serde_json::from_str(include_str!(
+            "../resources/vrx/input/bindings/steam.app.438100_alvr_vrx_controller.json"
+        ))
+        .unwrap();
+        assert_eq!(binding["controller_type"], "alvr_vrx_controller");
+        assert_eq!(binding["options"], serde_json::json!({}));
+        for set in binding["bindings"].as_object().unwrap().values() {
+            for kind in ["sources", "poses", "skeleton", "haptics"] {
+                for entry in set[kind].as_array().into_iter().flatten() {
+                    let path = entry["path"].as_str().unwrap();
+                    let path = path
+                        .strip_prefix("/user/hand/left")
+                        .or_else(|| path.strip_prefix("/user/hand/right"))
+                        .unwrap();
+                    assert!(profile["input_source"].get(path).is_some(), "{path}");
+                }
+            }
+        }
+        let poses = binding["bindings"]["/actions/global"]["poses"]
+            .as_array()
+            .unwrap();
+        assert_eq!(poses.len(), 2);
+        for pose in poses {
+            assert!(pose["path"].as_str().unwrap().ends_with("/pose/openxr_aim"));
+        }
     }
 }
 
@@ -273,6 +442,17 @@ pub fn build_streamer(
                 &build_layout.openvr_driver_lib_dir().join("resources"),
             );
         }
+
+        // Input profiles belong to ALVR, not the private Lenovo model bundle.
+        // Copy last so an older local bundle cannot replace the native mappings.
+        let vrx_input_resources = afs::crate_dir("xtask").join("resources/vrx");
+        copy_dir_contents(&vrx_input_resources, &build_layout.resources_dir());
+        copy_dir_contents(
+            &vrx_input_resources,
+            &build_layout.openvr_driver_lib_dir().join("resources"),
+        );
+        sync_vrx_model_poses(&build_layout.resources_dir());
+        sync_vrx_model_poses(&build_layout.openvr_driver_lib_dir().join("resources"));
     }
 }
 

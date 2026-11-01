@@ -80,55 +80,23 @@ pub fn resolution_schema() -> PresetSchemaNode {
             .collect(),
             content: None,
         })
-        .chain(std::iter::once(HigherOrderChoiceOption {
-            display_name: "ThinkReality VRX (2280 native)".into(),
-            modifiers: [
-                string_modifier("session_settings.headset.emulation_mode.variant", "ThinkRealityVRX"),
-                bool_modifier("session_settings.headset.controllers.enabled", true),
-                string_modifier("session_settings.headset.controllers.content.emulation_mode.variant", "ThinkRealityVRX"),
-                string_modifier("session_settings.video.vrx_graphics_backend.variant", "PublicMediaCodec"),
-                string_modifier(
-                    "session_settings.video.transcoding_view_resolution.variant",
-                    "Absolute",
-                ),
-                num_modifier(
-                    "session_settings.video.transcoding_view_resolution.Absolute.width",
-                    "2304",
-                ),
-                bool_modifier(
-                    "session_settings.video.transcoding_view_resolution.Absolute.height.set",
-                    true,
-                ),
-                num_modifier(
-                    "session_settings.video.transcoding_view_resolution.Absolute.height.content",
-                    "2304",
-                ),
-                string_modifier(
-                    "session_settings.video.emulated_headset_view_resolution.variant",
-                    "Absolute",
-                ),
-                num_modifier(
-                    "session_settings.video.emulated_headset_view_resolution.Absolute.width",
-                    "2280",
-                ),
-                bool_modifier(
-                    "session_settings.video.emulated_headset_view_resolution.Absolute.height.set",
-                    true,
-                ),
-                num_modifier(
-                    "session_settings.video.emulated_headset_view_resolution.Absolute.height.content",
-                    "2280",
-                ),
-                num_modifier("session_settings.video.preferred_fps", "90.0"),
-                string_modifier("session_settings.video.preferred_codec.variant", "Hevc"),
-                bool_modifier("session_settings.video.foveated_encoding.enabled", false),
-                bool_modifier("session_settings.video.clientside_foveation.enabled", false),
-                bool_modifier("session_settings.video.clientside_post_processing.enabled", false),
-                bool_modifier("session_settings.video.color_correction.enabled", false),
-                bool_modifier("session_settings.video.upscaling.enabled", false),
-            ]
-            .into_iter()
-            .collect(),
+        .chain([
+            ("ThinkReality VRX (native: 2280 x 2280)", "2280"),
+            ("ThinkReality VRX (80%: 1824 x 1824)", "1824"),
+        ].into_iter().map(|(label, size)| HigherOrderChoiceOption {
+            display_name: label.into(),
+            modifiers: ["transcoding_view_resolution", "emulated_headset_view_resolution"]
+                .into_iter()
+                .flat_map(|field| {
+                    let prefix = format!("session_settings.video.{field}");
+                    [
+                        string_modifier(&format!("{prefix}.variant"), "Absolute"),
+                        num_modifier(&format!("{prefix}.Absolute.width"), size),
+                        bool_modifier(&format!("{prefix}.Absolute.height.set"), true),
+                        num_modifier(&format!("{prefix}.Absolute.height.content"), size),
+                    ]
+                })
+                .collect(),
             content: None,
         }))
         .collect(),
@@ -553,59 +521,88 @@ pub fn eye_face_tracking_schema() -> PresetSchemaNode {
 #[cfg(test)]
 mod vrx_tests {
     use super::*;
+
+    fn apply(preset: &HigherOrderChoiceOption, session: &mut serde_json::Value) {
+        for modifier in &preset.modifiers {
+            let pointer = format!("/{}", modifier.target_path.replace('.', "/"));
+            let target = session
+                .pointer_mut(&pointer)
+                .unwrap_or_else(|| panic!("Invalid resolution preset path: {pointer}"));
+            let PresetModifierOperation::Assign(value) = &modifier.operation;
+            *target = value.clone();
+        }
+    }
+
     #[test]
-    fn vrx_preset_selects_native_identity_and_public_geometry() {
+    fn vrx_native_and_80_percent_are_independent_square_resolutions() {
         let PresetSchemaNode::HigherOrderChoice(schema) = resolution_schema() else {
             panic!("Expected resolution presets")
         };
-        let preset = schema
+        let vrx = schema
             .options
-            .into_iter()
-            .find(|p| p.display_name.starts_with("ThinkReality VRX"))
-            .unwrap();
-        let mut value = serde_json::to_value(alvr_session::SessionConfig::default()).unwrap();
-        value["session_settings"]["video"]["color_correction"]["enabled"] = true.into();
-        value["session_settings"]["video"]["color_correction"]["content"]["sharpening"] =
-            1.0.into();
-        for modifier in preset.modifiers {
-            let pointer = format!("/{}", modifier.target_path.replace('.', "/"));
-            let target = value
-                .pointer_mut(&pointer)
-                .unwrap_or_else(|| panic!("Invalid VRX preset path: {pointer}"));
-            let PresetModifierOperation::Assign(new_value) = modifier.operation;
-            *target = new_value;
+            .iter()
+            .filter(|p| p.display_name.starts_with("ThinkReality VRX"))
+            .collect::<Vec<_>>();
+        assert_eq!(vrx.len(), 2);
+        for (label, expected) in [
+            ("ThinkReality VRX (native: 2280 x 2280)", 2280),
+            ("ThinkReality VRX (80%: 1824 x 1824)", 1824),
+        ] {
+            let preset = vrx.iter().find(|p| p.display_name == label).unwrap();
+            let mut value = serde_json::to_value(alvr_session::SessionConfig::default()).unwrap();
+            apply(preset, &mut value);
+            let session: alvr_session::SessionConfig = serde_json::from_value(value).unwrap();
+            let settings = session.to_settings();
+            for resolution in [
+                settings.video.transcoding_view_resolution,
+                settings.video.emulated_headset_view_resolution,
+            ] {
+                assert!(matches!(resolution, alvr_session::FrameSize::Absolute {
+                    width, height: Some(height)
+                } if width == expected && height == expected));
+            }
         }
-        let session: alvr_session::SessionConfig = serde_json::from_value(value).unwrap();
-        let settings = session.to_settings();
-        assert!(matches!(
-            settings.headset.emulation_mode,
-            alvr_session::HeadsetEmulationMode::ThinkRealityVRX
-        ));
-        assert!(
-            matches!(settings.headset.controllers, alvr_common::settings_schema::Switch::Enabled(c) if matches!(c.emulation_mode, alvr_session::ControllersEmulationMode::ThinkRealityVRX))
-        );
-        assert!(matches!(
-            settings.video.vrx_graphics_backend,
-            alvr_session::VrxGraphicsBackend::PublicMediaCodec
-        ));
-        assert!(matches!(
-            settings.video.transcoding_view_resolution,
-            alvr_session::FrameSize::Absolute {
-                width: 2304,
-                height: Some(2304)
+    }
+
+    #[test]
+    fn every_resolution_preset_preserves_all_other_session_settings() {
+        let PresetSchemaNode::HigherOrderChoice(schema) = resolution_schema() else {
+            panic!("Expected resolution presets")
+        };
+        for enable_features in [false, true] {
+            let mut baseline =
+                serde_json::to_value(alvr_session::SessionConfig::default()).unwrap();
+            let video = &mut baseline["session_settings"]["video"];
+            video["preferred_fps"] = 90.0.into();
+            video["preferred_codec"]["variant"] = "H264".into();
+            for feature in [
+                "foveated_encoding",
+                "clientside_foveation",
+                "clientside_post_processing",
+                "color_correction",
+                "upscaling",
+            ] {
+                video[feature]["enabled"] = enable_features.into();
             }
-        ));
-        assert!(matches!(
-            settings.video.emulated_headset_view_resolution,
-            alvr_session::FrameSize::Absolute {
-                width: 2280,
-                height: Some(2280)
+            for preset in &schema.options {
+                let mut actual = baseline.clone();
+                apply(preset, &mut actual);
+                // Restore only the two allowed fields, then compare the entire session.
+                // This catches changes to identity, refresh rate, codec, backend or any
+                // current/future quality, audio, tracking and connection setting.
+                for field in [
+                    "transcoding_view_resolution",
+                    "emulated_headset_view_resolution",
+                ] {
+                    actual["session_settings"]["video"][field] =
+                        baseline["session_settings"]["video"][field].clone();
+                }
+                assert_eq!(
+                    actual, baseline,
+                    "{} changed unrelated settings",
+                    preset.display_name
+                );
             }
-        ));
-        assert_eq!(settings.video.preferred_fps, 90.0);
-        assert!(matches!(
-            settings.video.color_correction,
-            alvr_common::settings_schema::Switch::Disabled
-        ));
+        }
     }
 }

@@ -78,7 +78,7 @@ impl Launcher {
     ) -> PopupType {
         let response = alvr_gui_common::modal(
             ctx,
-            "Add version",
+            "添加版本",
             {
                 // Safety: unwrap is safe because the "Add release" button is available after populating the release_channels_info.
                 let release_channels_info = self.release_channels_info.as_ref().unwrap();
@@ -111,11 +111,11 @@ impl Launcher {
                         .collect();
 
                     Grid::new("add-version-grid").num_columns(2).show(ui, |ui| {
-                        ui.label("Channel");
+                        ui.label("发布渠道");
                         ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                             let channel_str = match version.release_channel {
-                                ReleaseChannelType::Stable => "Stable",
-                                ReleaseChannelType::Nightly => "Nightly",
+                                ReleaseChannelType::Stable => "稳定版",
+                                ReleaseChannelType::Nightly => "每日构建版",
                             };
 
                             ComboBox::from_id_salt("channel")
@@ -127,7 +127,7 @@ impl Launcher {
                                             string: release_channels_info.stable[0].version.clone(),
                                             release_channel: ReleaseChannelType::Stable,
                                         },
-                                        "Stable",
+                                        "稳定版",
                                     );
                                     ui.selectable_value(
                                         &mut version,
@@ -137,13 +137,13 @@ impl Launcher {
                                                 .clone(),
                                             release_channel: ReleaseChannelType::Nightly,
                                         },
-                                        "Nightly",
+                                        "每日构建版",
                                     );
                                 })
                         });
                         ui.end_row();
 
-                        ui.label("Version");
+                        ui.label("版本");
                         ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                             ComboBox::from_id_salt("version")
                                 .selected_text(version_str)
@@ -156,12 +156,12 @@ impl Launcher {
                         ui.end_row();
 
                         if cfg!(windows) {
-                            ui.label("Copy session from:");
+                            ui.label("从以下版本复制配置：");
                             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                                 ComboBox::from_id_salt("session")
-                                    .selected_text(session_version.clone().unwrap_or("None".into()))
+                                    .selected_text(session_version.clone().unwrap_or("无".into()))
                                     .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut session_version, None, "None");
+                                        ui.selectable_value(&mut session_version, None, "无");
                                         for ver_str in installations_with_session {
                                             ui.selectable_value(
                                                 &mut session_version,
@@ -176,7 +176,7 @@ impl Launcher {
                     });
                 })
             },
-            &[ModalButton::Cancel, ModalButton::Custom("Install".into())],
+            &[ModalButton::Cancel, ModalButton::Custom("安装".into())],
             None,
         );
 
@@ -224,10 +224,10 @@ impl Launcher {
         let mut delete_version = false;
         let response = alvr_gui_common::modal(
             ctx,
-            "Edit version",
+            "编辑版本",
             Some(|ui: &mut Ui| {
                 ui.with_layout(Layout::top_down_justified(Align::Center), |ui| {
-                    delete_version = ui.button("Delete version").clicked();
+                    delete_version = ui.button("删除版本").clicked();
                 });
             }),
             &[ModalButton::Close],
@@ -246,19 +246,16 @@ impl Launcher {
     fn delete_popup(&mut self, ctx: &Context, version: String) -> PopupType {
         let response = alvr_gui_common::modal(
             ctx,
-            "Are you sure?",
+            "确定要继续吗？",
             Some({
                 let version = version.clone();
                 move |ui: &mut Ui| {
                     ui.with_layout(Layout::top_down(Align::Center), |ui| {
-                        ui.label(format!("This will permanently delete version {version}"));
+                        ui.label(format!("这将永久删除版本 {version}"));
                     });
                 }
             }),
-            &[
-                ModalButton::Cancel,
-                ModalButton::Custom("Delete version".into()),
-            ],
+            &[ModalButton::Cancel, ModalButton::Custom("删除版本".into())],
             None,
         );
 
@@ -266,7 +263,7 @@ impl Launcher {
             Some(ModalButton::Cancel) => PopupType::None,
             Some(ModalButton::Custom(_)) => {
                 if let Err(e) = actions::delete_installation(&version) {
-                    self.state = State::Error(format!("Failed to delete version: {e}"));
+                    self.state = State::Error(format!("删除版本失败：{e}"));
                 }
 
                 self.installations = actions::get_installations();
@@ -298,10 +295,10 @@ impl eframe::App for Launcher {
         CentralPanel::default().show(ui, |ui| match &self.state {
             State::Default => {
                 ui.with_layout(Layout::top_down(Align::Center), |ui| {
-                    ui.label(RichText::new("ALVR Launcher").size(25.0).strong());
+                    ui.label(RichText::new("ALVR 启动器").size(25.0).strong());
                     ui.label(match &self.release_channels_info {
-                        Some(data) => format!("Latest stable release: {}", data.stable[0].version),
-                        None => "Fetching latest release...".into(),
+                        Some(data) => format!("最新稳定版：{}", data.stable[0].version),
+                        None => "正在获取最新版本…".into(),
                     });
 
                     for installation in &self.installations {
@@ -316,13 +313,13 @@ impl eframe::App for Launcher {
                                     .show(ui, |ui| {
                                         ui.label(&installation.version);
                                         ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                                            if ui.button("Edit").clicked() {
+                                            if ui.button("编辑").clicked() {
                                                 self.popup = PopupType::EditVersion(
                                                     installation.version.clone(),
                                                 );
                                             }
 
-                                            if ui.button("Open directory").clicked() {
+                                            if ui.button("打开目录").clicked() {
                                                 open::that_in_background(path);
                                             }
 
@@ -339,7 +336,7 @@ impl eframe::App for Launcher {
                                                 .add_enabled(
                                                     release_info.is_some()
                                                         || installation.is_apk_downloaded,
-                                                    Button::new("Install APK"),
+                                                    Button::new("安装 APK"),
                                                 )
                                                 .clicked()
                                             {
@@ -350,13 +347,12 @@ impl eframe::App for Launcher {
                                                         ))
                                                         .ok();
                                                 } else {
-                                                    self.state = State::Error(
-                                                        "Failed to get release info".into(),
-                                                    );
+                                                    self.state =
+                                                        State::Error("获取版本信息失败".into());
                                                 }
                                             };
 
-                                            if ui.button("Launch").clicked() {
+                                            if ui.button("启动").clicked() {
                                                 match actions::launch_dashboard(
                                                     &installation.version,
                                                 ) {
@@ -381,7 +377,7 @@ impl eframe::App for Launcher {
                     if ui
                         .add_enabled(
                             self.release_channels_info.is_some(),
-                            Button::new("Add version"),
+                            Button::new("添加版本"),
                         )
                         .clicked()
                     {
@@ -417,10 +413,10 @@ impl eframe::App for Launcher {
             State::Error(e) => {
                 let e = e.clone(); // Avoid borrowing issues with the closure for the layout
                 ui.with_layout(Layout::top_down(Align::Center), |ui| {
-                    ui.colored_label(Color32::LIGHT_RED, "Error!");
+                    ui.colored_label(Color32::LIGHT_RED, "错误！");
                     ui.label(e);
 
-                    if ui.button("Close").clicked() {
+                    if ui.button("关闭").clicked() {
                         self.state = State::Default;
                     }
                 });
