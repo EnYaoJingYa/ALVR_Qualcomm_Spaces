@@ -527,6 +527,7 @@ mod tests {
                 history: alvr_packets::vrx_phase::History {
                     atw: [0, 1]
                         .map(|eye| alvr_packets::vrx_phase::VrxEyeRecord {
+                            image: Default::default(),
                             eye,
                             video_timestamp_ns: 1,
                             submission: sequence,

@@ -71,6 +71,7 @@ pub struct ConnectionContext {
     pub vrx_phase_offer: Mutex<Option<(u64, u64)>>,
     // Capability and latest feedback have separate bounded slots. No socket IO
     // or unbounded queue growth is allowed on the OpenXR submission thread.
+    pub vrx_phase_wakeup: Condvar,
     pub vrx_phase_pending: Mutex<[Option<alvr_packets::vrx_phase::VrxPhaseMessage>; 2]>,
 }
 
@@ -475,7 +476,7 @@ fn connection_pipeline(
                     phase_timeout_set = true;
                 }
                 let timeout = if phase_enabled {
-                    Duration::from_millis(5)
+                    Duration::ZERO
                 } else {
                     STREAMING_RECV_TIMEOUT
                 };
@@ -489,7 +490,13 @@ fn connection_pipeline(
                     break;
                 }
 
-                let phase_messages = std::mem::take(&mut *ctx.vrx_phase_pending.lock());
+                let phase_messages = {
+                    let mut pending = ctx.vrx_phase_pending.lock();
+                    if phase_enabled && pending.iter().all(Option::is_none) {
+                        ctx.vrx_phase_wakeup.wait_for(&mut pending, Duration::from_millis(2));
+                    }
+                    std::mem::take(&mut *pending)
+                };
                 for mut message in phase_messages.into_iter().flatten() {
                     if let alvr_packets::vrx_phase::VrxPhaseMessage::Feedback { sequence, .. } =
                         &mut message

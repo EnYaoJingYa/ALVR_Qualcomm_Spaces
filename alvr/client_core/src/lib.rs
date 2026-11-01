@@ -366,6 +366,7 @@ impl ClientCoreContext {
             *history = accumulated;
         }
         pending[slot] = Some(message);
+        self.connection_context.vrx_phase_wakeup.notify_one();
     }
 }
 

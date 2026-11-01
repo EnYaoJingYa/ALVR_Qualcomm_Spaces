@@ -7,6 +7,7 @@ mod lobby;
 mod passthrough;
 mod stream;
 mod vrx_counter;
+mod vrx_feedback;
 #[cfg(target_os = "android")]
 mod waiting;
 

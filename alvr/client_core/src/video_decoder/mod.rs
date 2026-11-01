@@ -81,6 +81,7 @@ impl VideoDecoderSink {
 }
 
 pub struct VideoDecoderSource {
+    identity: alvr_packets::vrx_phase::ImageIdentity,
     #[cfg(target_os = "android")]
     inner: android::VideoDecoderSource,
 }
@@ -94,9 +95,16 @@ impl VideoDecoderSource {
 
     /// If a frame is available, return the timestamp and the AHardwareBuffer.
     pub fn get_frame(&mut self) -> Option<(Duration, *mut std::ffi::c_void)> {
+        self.get_frame_with_identity().map(|(_, timestamp, buffer)| (timestamp, buffer))
+    }
+
+    /// Every successfully acquired image is fresh, even with a repeated tracking timestamp.
+    pub fn get_frame_with_identity(&mut self) -> Option<(alvr_packets::vrx_phase::ImageIdentity, Duration, *mut std::ffi::c_void)> {
         #[cfg(target_os = "android")]
         {
-            self.inner.dequeue_frame()
+            let (timestamp, buffer) = self.inner.dequeue_frame()?;
+            self.identity.image += 1;
+            Some((self.identity, timestamp, buffer))
         }
         #[cfg(not(target_os = "android"))]
         None
@@ -109,6 +117,11 @@ pub fn create_decoder(
     config: VideoDecoderConfig,
     report_frame_decoded: impl Fn(Result<Duration>) + Send + Sync + 'static,
 ) -> Result<(VideoDecoderSink, VideoDecoderSource)> {
+    static NEXT_DECODER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let identity = alvr_packets::vrx_phase::ImageIdentity {
+        decoder: NEXT_DECODER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        image: 0,
+    };
     #[cfg(target_os = "android")]
     {
         let (sink, source) = android::video_decoder_split(
@@ -119,11 +132,11 @@ pub fn create_decoder(
 
         Ok((
             VideoDecoderSink { inner: sink },
-            VideoDecoderSource { inner: source },
+            VideoDecoderSource { inner: source, identity },
         ))
     }
     #[cfg(not(target_os = "android"))]
-    Ok((VideoDecoderSink {}, VideoDecoderSource {}))
+    Ok((VideoDecoderSink {}, VideoDecoderSource { identity }))
 }
 
 // Recover sustained slow outputs, without treating abandoned image callbacks as input backlog.
