@@ -68,6 +68,10 @@ pub struct ConnectionContext {
     pub video_frame_metadata_queue: Mutex<VecDeque<(Duration, VideoFrameMetadata)>>,
     pub max_prediction: RwLock<Duration>,
     pub fatal_decoder_error: Mutex<Option<String>>,
+    pub vrx_phase_offer: Mutex<Option<(u64, u64)>>,
+    // Capability and latest feedback have separate bounded slots. No socket IO
+    // or unbounded queue growth is allowed on the OpenXR submission thread.
+    pub vrx_phase_pending: Mutex<[Option<alvr_packets::vrx_phase::VrxPhaseMessage>; 2]>,
 }
 
 fn set_hud_message(event_queue: &Mutex<VecDeque<ClientCoreEvent>>, message: &str) {
@@ -451,12 +455,31 @@ fn connection_pipeline(
         let disconnect_notif = Arc::clone(&disconnect_notif);
         move || {
             let mut keepalive_deadline = Instant::now();
+            let mut phase_timeout_set = false;
+            let mut sent_batches = 0u64;
 
             #[cfg(target_os = "android")]
             let mut battery_deadline = Instant::now();
 
-            while is_streaming(&ctx) && *lifecycle_state.read() == LifecycleState::Resumed {
-                if let Ok(packet) = log_channel_receiver.recv_timeout(STREAMING_RECV_TIMEOUT)
+            'send: while is_streaming(&ctx) && *lifecycle_state.read() == LifecycleState::Resumed {
+                let phase_enabled = ctx.vrx_phase_offer.lock().is_some();
+                if phase_enabled && !phase_timeout_set {
+                    if let Some(sender) = &*ctx.control_sender.lock()
+                        && let Err(error) = sender.set_write_timeout(STREAMING_RECV_TIMEOUT)
+                    {
+                        error!(
+                            "event=vrx_phase_failed stage=transport_setup code=write_timeout retryable=true fallback=reconnect resources=control_socket detail={error}"
+                        );
+                        break;
+                    }
+                    phase_timeout_set = true;
+                }
+                let timeout = if phase_enabled {
+                    Duration::from_millis(5)
+                } else {
+                    STREAMING_RECV_TIMEOUT
+                };
+                if let Ok(packet) = log_channel_receiver.recv_timeout(timeout)
                     && let Some(sender) = &mut *ctx.control_sender.lock()
                     && let Err(e) = sender.send(&packet)
                 {
@@ -464,6 +487,23 @@ fn connection_pipeline(
                     set_hud_message(&event_queue, SERVER_DISCONNECTED_MESSAGE);
 
                     break;
+                }
+
+                let phase_messages = std::mem::take(&mut *ctx.vrx_phase_pending.lock());
+                for mut message in phase_messages.into_iter().flatten() {
+                    if let alvr_packets::vrx_phase::VrxPhaseMessage::Feedback { sequence, .. } =
+                        &mut message
+                    {
+                        sent_batches += 1;
+                        *sequence = sent_batches;
+                    }
+                    if let Some(value) = message.encode()
+                        && let Some(sender) = &mut *ctx.control_sender.lock()
+                        && let Err(error) = sender.send(&ClientControlPacket::Reserved(value))
+                    {
+                        info!("Phase feedback transport failed; recovering connection: {error}");
+                        break 'send;
+                    }
                 }
 
                 if Instant::now() > keepalive_deadline
@@ -527,9 +567,19 @@ fn connection_pipeline(
                         error!("Unexpected StartStream paceket");
                     }
                     Ok(ServerControlPacket::KeepAlive) => (),
-                    Ok(
-                        ServerControlPacket::Reserved(_) | ServerControlPacket::ReservedBuffer(_),
-                    ) => {}
+                    Ok(ServerControlPacket::Reserved(value)) => {
+                        use alvr_packets::vrx_phase::{VRX_PHASE_VERSION, VrxPhaseMessage};
+                        if let Some(VrxPhaseMessage::Offer {
+                            version,
+                            session,
+                            token,
+                        }) = VrxPhaseMessage::decode(&value)
+                            && version == VRX_PHASE_VERSION
+                        {
+                            *ctx.vrx_phase_offer.lock() = Some((session, token));
+                        }
+                    }
+                    Ok(ServerControlPacket::ReservedBuffer(_)) => {}
                     Err(ConnectionError::TryAgain(_)) => {
                         if Instant::now() > disconnection_deadline {
                             info!("{CONNECTION_TIMEOUT_MESSAGE}");
@@ -593,6 +643,8 @@ fn connection_pipeline(
     *connection_state_lock = ConnectionState::Disconnecting;
 
     *ctx.control_sender.lock() = None;
+    *ctx.vrx_phase_offer.lock() = None;
+    *ctx.vrx_phase_pending.lock() = Default::default();
     *ctx.tracking_sender.lock() = None;
     *ctx.statistics_sender.lock() = None;
     *LOG_CHANNEL_SENDER.lock() = None;

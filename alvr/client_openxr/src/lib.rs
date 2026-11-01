@@ -6,6 +6,7 @@ mod interaction;
 mod lobby;
 mod passthrough;
 mod stream;
+mod vrx_counter;
 #[cfg(target_os = "android")]
 mod waiting;
 
@@ -740,9 +741,9 @@ pub fn entry_point() {
             };
         info!("event=openxr_stage_complete stage=session_create");
 
-        let refresh_rates = if selected_exts.fb_display_refresh_rate {
+        let (refresh_rates, refresh_rate_source) = if selected_exts.fb_display_refresh_rate {
             match xr_session.enumerate_display_refresh_rates() {
-                Ok(rates) => rates,
+                Ok(rates) => (rates, "runtime_enumeration"),
                 Err(error) => {
                     StageFailure::from_error(
                         "display_refresh_rate_query",
@@ -752,12 +753,15 @@ pub fn entry_point() {
                         "instance,system,session",
                     )
                     .log(platform);
-                    vec![90.0]
+                    (vec![90.0], "query_error_fallback")
                 }
             }
         } else {
-            vec![90.0]
+            (vec![90.0], "extension_unavailable_fallback")
         };
+        info!(
+            "event=display_refresh_capabilities source={refresh_rate_source} rates={refresh_rates:?}"
+        );
 
         if selected_exts.fb_color_space {
             if let Err(error) = xr_session.set_color_space(xr::ColorSpaceFB::REC709) {
@@ -1187,11 +1191,16 @@ pub fn entry_point() {
             let vsync_time =
                 Duration::from_nanos(frame_state.predicted_display_time.as_nanos() as _);
             let wait_elapsed = wait_started.elapsed();
+            if let Some(stream) = &mut stream_context {
+                stream.report_vrx_wait();
+            }
             timing_sample_index = timing_sample_index.wrapping_add(1);
             let sample_timing = platform == Platform::ThinkRealityVRX
                 && stream_context.is_some()
                 && timing_sample_index % 90 == 1;
-            let wait_now = sample_timing.then(|| xr_runtime_now(&xr_instance)).flatten();
+            let wait_now = sample_timing
+                .then(|| xr_runtime_now(&xr_instance))
+                .flatten();
             let begin_started = Instant::now();
 
             if let Err(error) = xr_frame_stream.begin() {
@@ -1261,13 +1270,20 @@ pub fn entry_point() {
                 ));
                 break 'render_loop;
             }
-            let submit_now = sample_timing.then(|| xr_runtime_now(&xr_instance)).flatten();
+            let submit_now = sample_timing
+                .then(|| xr_runtime_now(&xr_instance))
+                .flatten();
             let end_started = Instant::now();
             let res = xr_frame_stream.end(
                 to_xr_time(display_time),
                 xr::EnvironmentBlendMode::OPAQUE,
                 layers,
             );
+            if res.is_ok()
+                && let Some(stream) = &mut stream_context
+            {
+                stream.confirm_vrx_frame();
+            }
 
             if let (Some(wait_now), Some(submit_now)) = (wait_now, submit_now) {
                 // Diagnostic only: preserve runtime timestamps and all latency accounting.

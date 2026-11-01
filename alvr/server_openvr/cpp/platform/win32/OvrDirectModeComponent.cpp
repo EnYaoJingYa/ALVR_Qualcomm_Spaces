@@ -254,6 +254,7 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
         }
     }
 
+    VrxPhaseFramePoint(1, m_targetTimestampNs);
     CopyTexture(layerCount);
 
     if (useMutex) {

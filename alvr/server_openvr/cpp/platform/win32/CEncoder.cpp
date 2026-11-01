@@ -1,4 +1,5 @@
 #include "CEncoder.h"
+#include "alvr_server/bindings.h"
 
 CEncoder::CEncoder()
     : m_bExiting(false)
@@ -129,6 +130,7 @@ void CEncoder::Run() {
             break;
 
         if (m_FrameRender->GetTexture()) {
+            VrxPhaseFramePoint(2, m_targetTimestampNs);
             m_videoEncoder->Transmit(
                 m_FrameRender->GetTexture().Get(),
                 m_presentationTime,

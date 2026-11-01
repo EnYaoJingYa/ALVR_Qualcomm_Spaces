@@ -1,0 +1,20 @@
+[
+  {
+    "fault": "vrx_phase_frozen_counter",
+    "fallback": true,
+    "recovered": true,
+    "wired": "Streaming"
+  },
+  {
+    "fault": "vrx_phase_feedback_loss",
+    "fallback": true,
+    "recovered": true,
+    "wired": "Streaming"
+  },
+  {
+    "fault": "vrx_phase_service",
+    "fallback": true,
+    "recovered": true,
+    "wired": "Streaming"
+  }
+]

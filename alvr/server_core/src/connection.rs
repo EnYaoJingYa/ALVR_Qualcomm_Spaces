@@ -100,9 +100,18 @@ mod resolution_tests {
     #[test]
     fn vrx_custom_codec_surface_aligns_up_without_forcing_native() {
         use alvr_common::glam::UVec2;
-        for (requested, expected) in [(1440, 1440), (1856, 1856), (2000, 2016),
-            (2144, 2144), (2280, 2304), (2304, 2304)] {
-            assert_eq!(vrx_codec_surface(UVec2::splat(requested)), UVec2::splat(expected));
+        for (requested, expected) in [
+            (1440, 1440),
+            (1856, 1856),
+            (2000, 2016),
+            (2144, 2144),
+            (2280, 2304),
+            (2304, 2304),
+        ] {
+            assert_eq!(
+                vrx_codec_surface(UVec2::splat(requested)),
+                UVec2::splat(expected)
+            );
         }
     }
 
@@ -1024,9 +1033,9 @@ fn connection_pipeline(
         },
     ));
     if streaming_platform == Platform::ThinkRealityVRX {
-        info!(
-            "event=vrx_server_phase_sync state=disabled code=clock_mapping_unavailable fallback=nominal_frame_pacing"
-        );
+        if let Some(statistics) = &mut *ctx.statistics_manager.write() {
+            statistics.enable_lenovo_phase();
+        }
     }
     *ctx.bitrate_manager.lock() =
         BitrateManager::new(initial_settings.video.bitrate.history_size, fps);
@@ -1305,6 +1314,7 @@ fn connection_pipeline(
     });
 
     let keepalive_thread = thread::spawn({
+        let ctx = Arc::clone(&ctx);
         let control_sender = Arc::clone(&control_sender);
         let disconnect_notif = Arc::clone(&disconnect_notif);
         let client_hostname = client_hostname.clone();
@@ -1318,6 +1328,17 @@ fn connection_pipeline(
                     return;
                 }
 
+                let offer = ctx
+                    .statistics_manager
+                    .write()
+                    .as_mut()
+                    .and_then(|stats| stats.vrx_phase_offer());
+                if let Some(value) = offer {
+                    control_sender
+                        .lock()
+                        .send(&ServerControlPacket::Reserved(value))
+                        .ok();
+                }
                 thread::sleep(KEEPALIVE_INTERVAL);
             }
         }
@@ -1486,7 +1507,12 @@ fn connection_pipeline(
                             .send(ServerCoreEvent::ProximityState(headset_is_worn))
                             .ok();
                     }
-                    ClientControlPacket::Reserved(_) | ClientControlPacket::ReservedBuffer(_) => (),
+                    ClientControlPacket::Reserved(value) => {
+                        if let Some(stats) = &mut *ctx.statistics_manager.write() {
+                            stats.receive_vrx_phase(&value);
+                        }
+                    }
+                    ClientControlPacket::ReservedBuffer(_) => (),
                 }
 
                 disconnection_deadline = Instant::now() + KEEPALIVE_TIMEOUT;
@@ -1562,7 +1588,8 @@ fn connection_pipeline(
             ServerNegotiatedStreamingConfig {
                 center_composition: streaming_platform == Platform::ThinkRealityVRX
                     && transcoding_view_resolution == alvr_system_info::VRX_ENCODED_EYE_RESOLUTION
-                    && emulated_headset_view_resolution == alvr_system_info::VRX_VISIBLE_EYE_RESOLUTION,
+                    && emulated_headset_view_resolution
+                        == alvr_system_info::VRX_VISIBLE_EYE_RESOLUTION,
                 transcoding_view_resolution,
                 emulated_headset_view_resolution,
                 refresh_rate: fps as _,

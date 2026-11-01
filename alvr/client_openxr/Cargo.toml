@@ -86,6 +86,9 @@ name = "android.permission.WAKE_LOCK"
 name = "org.khronos.openxr.permission.OPENXR"
 [[package.metadata.android.uses_permission]]
 name = "org.khronos.openxr.permission.OPENXR_SYSTEM"
+[[package.metadata.android.uses_permission]]
+# Normal install-time permission for the optional read-only VSync probe.
+name = "com.qualcomm.qti.qxr.QXRServiceClientPermission"
 
 [[package.metadata.android.queries.intent]]
 actions = ["org.khronos.openxr.OpenXRRuntimeService"]

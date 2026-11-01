@@ -54,7 +54,10 @@ pub struct StatisticsManager {
     steamvr_pipeline_latency: Duration,
     motion_to_photon_latency_average: SlidingWindowAverage<Duration>,
     last_vsync_time: Instant,
+    vrx_phase: Option<crate::vrx_phase::PhaseSession>,
     frame_interval: Duration,
+    nominal_frame_interval: Duration,
+    phase_deadline: Option<Instant>,
     last_throughput_directives: BitrateDirectives,
 }
 
@@ -84,8 +87,25 @@ impl StatisticsManager {
                 max_history_size,
             ),
             last_vsync_time: Instant::now(),
+            vrx_phase: None,
+            phase_deadline: None,
             frame_interval: nominal_server_frame_interval,
+            nominal_frame_interval: nominal_server_frame_interval,
             last_throughput_directives: BitrateDirectives::default(),
+        }
+    }
+
+    pub fn enable_lenovo_phase(&mut self) {
+        self.vrx_phase = Some(crate::vrx_phase::PhaseSession::new(self.frame_interval));
+    }
+
+    pub fn vrx_phase_offer(&mut self) -> Option<String> {
+        self.vrx_phase.as_mut().and_then(|phase| phase.offer())
+    }
+
+    pub fn receive_vrx_phase(&mut self, value: &str) {
+        if let Some(phase) = &mut self.vrx_phase {
+            phase.receive(value);
         }
     }
 
@@ -304,6 +324,38 @@ impl StatisticsManager {
     pub fn duration_until_next_vsync(&mut self) -> Duration {
         let now = Instant::now();
 
+        if let Some(phase) = &mut self.vrx_phase {
+            if let Some((period, correction, pll)) = phase.tick(now) {
+                // Packed stereo consumes the full-period branch once per Present.
+                let (saved, target) = crate::vrx_phase::deadline(
+                    self.phase_deadline,
+                    now,
+                    period,
+                    correction,
+                    true,
+                    pll,
+                    Duration::ZERO,
+                );
+                self.phase_deadline = Some(saved);
+                if let Some(t) = crate::vrx_diagnostic_time_ns() {
+                    let delta = if target >= now {
+                        (target - now).as_nanos() as i64
+                    } else {
+                        -((now - target).as_nanos() as i64)
+                    };
+                    let step = if pll { correction } else { 0 };
+                    alvr_common::info!(
+                        "event=phase_wait_target pc_ns={t} before_delta_ns={} after_delta_ns={delta} step_ns={step}",
+                        delta - step
+                    );
+                }
+                return target.saturating_duration_since(now);
+            }
+            if self.phase_deadline.take().is_some() {
+                self.last_vsync_time = now;
+            }
+            self.frame_interval = self.nominal_frame_interval;
+        }
         // update the last vsync if it's too old
         while self.last_vsync_time + self.frame_interval < now {
             self.last_vsync_time += self.frame_interval;

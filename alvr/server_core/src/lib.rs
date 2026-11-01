@@ -8,6 +8,18 @@ mod logging_backend;
 mod sockets;
 mod statistics;
 mod tracking;
+mod vrx_phase;
+
+pub fn vrx_diagnostic_time_ns() -> Option<u64> {
+    static START: std::sync::OnceLock<Option<std::time::Instant>> = std::sync::OnceLock::new();
+    START
+        .get_or_init(|| {
+            (std::env::var("ALVR_VRX_LENOVO_PHASE").as_deref() == Ok("diagnostic"))
+                .then(std::time::Instant::now)
+        })
+        .as_ref()
+        .map(|start| start.elapsed().as_nanos() as u64)
+}
 mod web_server;
 
 pub use c_api::*;

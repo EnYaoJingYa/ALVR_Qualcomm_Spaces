@@ -699,6 +699,13 @@ extern "C" fn report_present(timestamp_ns: u64, offset_ns: u64) {
     }
 }
 
+#[unsafe(export_name = "VrxPhaseFramePoint")]
+extern "C" fn phase_frame_point(point: u32, video_ns: u64) {
+    if let Some(t) = alvr_server_core::vrx_diagnostic_time_ns() {
+        alvr_common::info!("event=phase_frame point={point} video_ns={video_ns} pc_ns={t}");
+    }
+}
+
 #[unsafe(export_name = "WaitForVSync")]
 extern "C" fn wait_for_vsync() {
     // Default 120Hz-ish wait if StatisticsManager isn't up.
@@ -718,6 +725,9 @@ extern "C" fn wait_for_vsync() {
             .enforce_server_frame_pacing
         {
             thread::sleep(duration);
+            if let Some(t) = alvr_server_core::vrx_diagnostic_time_ns() {
+                alvr_common::info!("event=phase_wake pc_ns={t}");
+            }
         } else {
             thread::yield_now();
         }

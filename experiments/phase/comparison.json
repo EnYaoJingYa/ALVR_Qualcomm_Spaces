@@ -1,0 +1,158 @@
+{
+  "A1": {
+    "mtp": {
+      "median": 58.892645,
+      "p95": 59.930656,
+      "p99": 60.144875
+    },
+    "seconds": 30.05859800000144,
+    "draws": 2705,
+    "reused": 2,
+    "new_fps": 89.92435375728004,
+    "repeat_fraction": 0.0007393715341959334,
+    "video_hash": "d0bc7b1d07771202bccca887e0e5d757d4487c36af17074f70c527de45e414b8",
+    "dashboard": true,
+    "reports": 2709,
+    "diagnostics": {
+      "candidate_count": 0,
+      "nonzero": 0
+    },
+    "breakdown_ms": {
+      "encoder_s": 3.6487,
+      "network_s": 3.1409849999999997,
+      "decoder_s": 3.764792,
+      "decoder_queue_s": 5.6055209999999995,
+      "vsync_queue_s": 35.873613999999996
+    }
+  },
+  "observe": {
+    "mtp": {
+      "median": 58.857472,
+      "p95": 59.746068,
+      "p99": 60.14088
+    },
+    "seconds": 30.08997200000158,
+    "draws": 2708,
+    "reused": 3,
+    "new_fps": 89.89705939240682,
+    "repeat_fraction": 0.0011078286558345643,
+    "video_hash": "d0bc7b1d07771202bccca887e0e5d757d4487c36af17074f70c527de45e414b8",
+    "dashboard": true,
+    "reports": 2712,
+    "diagnostics": {
+      "candidate_count": 48,
+      "nonzero": 0
+    },
+    "breakdown_ms": {
+      "encoder_s": 5.22325,
+      "network_s": 2.558425,
+      "decoder_s": 3.582734,
+      "decoder_queue_s": 4.1581765,
+      "vsync_queue_s": 36.084776999999995
+    }
+  },
+  "frequency": {
+    "mtp": {
+      "median": 58.749216000000004,
+      "p95": 59.78492,
+      "p99": 60.386587
+    },
+    "seconds": 30.051228000000265,
+    "draws": 2704,
+    "reused": 0,
+    "new_fps": 89.97968402489164,
+    "repeat_fraction": 0.0,
+    "video_hash": "d0bc7b1d07771202bccca887e0e5d757d4487c36af17074f70c527de45e414b8",
+    "dashboard": true,
+    "reports": 2710,
+    "diagnostics": {
+      "candidate_count": 48,
+      "nonzero": 0
+    },
+    "breakdown_ms": {
+      "encoder_s": 5.25435,
+      "network_s": 2.3990460000000002,
+      "decoder_s": 3.673568,
+      "decoder_queue_s": 4.350728999999999,
+      "vsync_queue_s": 35.83017400000001
+    }
+  },
+  "B1": {
+    "mtp": {
+      "median": 58.352630000000005,
+      "p95": 59.913880000000006,
+      "p99": 60.127687
+    },
+    "seconds": 30.042601000001014,
+    "draws": 2704,
+    "reused": 1,
+    "new_fps": 89.97223642519863,
+    "repeat_fraction": 0.0003698224852071006,
+    "video_hash": "d0bc7b1d07771202bccca887e0e5d757d4487c36af17074f70c527de45e414b8",
+    "dashboard": true,
+    "reports": 2707,
+    "diagnostics": {
+      "candidate_count": 49,
+      "nonzero": 0
+    },
+    "breakdown_ms": {
+      "encoder_s": 6.1502,
+      "network_s": 2.1565960000000004,
+      "decoder_s": 3.607761,
+      "decoder_queue_s": 0.994948,
+      "vsync_queue_s": 35.007857
+    }
+  },
+  "A2": {
+    "mtp": {
+      "median": 58.91302,
+      "p95": 59.88424,
+      "p99": 60.08591
+    },
+    "seconds": 30.0671710000006,
+    "draws": 2705,
+    "reused": 0,
+    "new_fps": 89.96523151446294,
+    "repeat_fraction": 0.0,
+    "video_hash": "d0bc7b1d07771202bccca887e0e5d757d4487c36af17074f70c527de45e414b8",
+    "dashboard": true,
+    "reports": 2711,
+    "diagnostics": {
+      "candidate_count": 0,
+      "nonzero": 0
+    },
+    "breakdown_ms": {
+      "encoder_s": 6.182499999999999,
+      "network_s": 2.215131,
+      "decoder_s": 3.8022910000000003,
+      "decoder_queue_s": 1.038021,
+      "vsync_queue_s": 35.494544000000005
+    }
+  },
+  "B2": {
+    "mtp": {
+      "median": 49.214124999999996,
+      "p95": 59.85843,
+      "p99": 60.07499
+    },
+    "seconds": 30.087910000000193,
+    "draws": 2707,
+    "reused": 1,
+    "new_fps": 89.9364562045015,
+    "repeat_fraction": 0.0003694126339120798,
+    "video_hash": "d0bc7b1d07771202bccca887e0e5d757d4487c36af17074f70c527de45e414b8",
+    "dashboard": true,
+    "reports": 2713,
+    "diagnostics": {
+      "candidate_count": 49,
+      "nonzero": 0
+    },
+    "breakdown_ms": {
+      "encoder_s": 5.978899999999999,
+      "network_s": 1.737029,
+      "decoder_s": 3.666041,
+      "decoder_queue_s": 0.830937,
+      "vsync_queue_s": 34.301610000000004
+    }
+  }
+}

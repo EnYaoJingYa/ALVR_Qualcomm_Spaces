@@ -333,6 +333,40 @@ impl ClientCoreContext {
     pub fn platform(&self) -> Platform {
         self.platform
     }
+
+    pub fn vrx_phase_offer(&self) -> Option<(u64, u64)> {
+        *self.connection_context.vrx_phase_offer.lock()
+    }
+
+    pub fn send_vrx_phase(&self, message: alvr_packets::vrx_phase::VrxPhaseMessage) {
+        if self.platform != Platform::ThinkRealityVRX {
+            return;
+        }
+        let slot = match &message {
+            alvr_packets::vrx_phase::VrxPhaseMessage::Capability { .. } => 0,
+            alvr_packets::vrx_phase::VrxPhaseMessage::Feedback { .. } => 1,
+            _ => return,
+        };
+        let mut message = message;
+        let mut pending = self.connection_context.vrx_phase_pending.lock();
+        use alvr_packets::vrx_phase::VrxPhaseMessage::Feedback;
+        if let (
+            Some(Feedback {
+                session: old,
+                history: mut accumulated,
+                ..
+            }),
+            Feedback {
+                session, history, ..
+            },
+        ) = (pending[slot].take(), &mut message)
+            && old == *session
+        {
+            accumulated.append(history);
+            *history = accumulated;
+        }
+        pending[slot] = Some(message);
+    }
 }
 
 impl Drop for ClientCoreContext {

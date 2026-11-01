@@ -222,6 +222,7 @@ extern "C" unsigned long long GetSerialNumber(unsigned long long deviceID, char*
 extern "C" void SetOpenvrProps(void* instancePtr, unsigned long long deviceID);
 extern "C" void RegisterButtons(void* instancePtr, unsigned long long deviceID);
 extern "C" void WaitForVSync();
+extern "C" void VrxPhaseFramePoint(unsigned int point, unsigned long long videoNs);
 
 // The vsync grid, in Rust. The driver starts and stops the announcer with its own lifetime, holds
 // Present against the grid, and reads the skipped tick count, without keeping a copy of any of it.

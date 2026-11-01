@@ -1,0 +1,88 @@
+{
+  "cold_start": [
+    {
+      "session": 2,
+      "seconds": 9.42
+    },
+    {
+      "session": 3,
+      "seconds": 11.33
+    },
+    {
+      "session": 4,
+      "seconds": 11.31
+    },
+    {
+      "session": 5,
+      "seconds": 9.31
+    },
+    {
+      "session": 6,
+      "seconds": 11.31
+    },
+    {
+      "session": 7,
+      "seconds": 8.27
+    },
+    {
+      "session": 8,
+      "seconds": 10.33
+    },
+    {
+      "session": 9,
+      "seconds": 8.3
+    },
+    {
+      "session": 10,
+      "seconds": 9.33
+    },
+    {
+      "session": 11,
+      "seconds": 8.3
+    }
+  ],
+  "reconnect": [
+    {
+      "session": 12,
+      "seconds": 5.09
+    },
+    {
+      "session": 13,
+      "seconds": 5.08
+    },
+    {
+      "session": 14,
+      "seconds": 5.09
+    },
+    {
+      "session": 15,
+      "seconds": 5.09
+    },
+    {
+      "session": 16,
+      "seconds": 5.06
+    },
+    {
+      "session": 17,
+      "seconds": 5.08
+    },
+    {
+      "session": 18,
+      "seconds": 5.06
+    },
+    {
+      "session": 19,
+      "seconds": 5.08
+    },
+    {
+      "session": 20,
+      "seconds": 5.06
+    },
+    {
+      "session": 21,
+      "seconds": 5.08
+    }
+  ],
+  "soak": [],
+  "passed": false
+}

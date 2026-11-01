@@ -1,3 +1,5 @@
+pub mod vrx_phase;
+
 use alvr_common::{
     AlvrFoveatedEncodingParams, BodySkeleton, ConnectionState, DeviceMotion, LogSeverity, Pose,
     ViewParams,

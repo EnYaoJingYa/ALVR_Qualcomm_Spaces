@@ -155,6 +155,10 @@ pub struct ControlSocketSender<T> {
 }
 
 impl<S: Serialize> ControlSocketSender<S> {
+    pub fn set_write_timeout(&self, timeout: Duration) -> Result<()> {
+        Ok(self.inner.set_write_timeout(Some(timeout))?)
+    }
+
     pub fn send(&mut self, packet: &S) -> Result<()> {
         framed_send(&mut self.inner, &mut self.buffer, packet)
     }

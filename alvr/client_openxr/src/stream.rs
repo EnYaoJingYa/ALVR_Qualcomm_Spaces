@@ -119,6 +119,18 @@ pub struct StreamContext {
     renderer: StreamRenderer,
     decoder: Option<(VideoDecoderConfig, VideoDecoderSource)>,
     use_custom_reprojection: bool,
+    phase_counter: Option<crate::vrx_counter::VrxCounter>,
+    phase_video: Option<Duration>,
+    phase_previous_video: Option<Duration>,
+    phase_duplicates: [u64; 2],
+    phase_sequence: u64,
+    phase_session: Option<u64>,
+    phase_confirmed: bool,
+    phase_submitted_at: Option<Instant>,
+    phase_epoch: Instant,
+    phase_submission: u64,
+    phase_capability: Option<(u64, bool)>,
+    phase_read_failures: u32,
 }
 
 impl StreamContext {
@@ -370,6 +382,18 @@ impl StreamContext {
         );
 
         let mut this = StreamContext {
+            phase_counter: None,
+            phase_epoch: Instant::now(),
+            phase_submission: 0,
+            phase_video: None,
+            phase_previous_video: None,
+            phase_duplicates: [0; 2],
+            phase_sequence: 0,
+            phase_session: None,
+            phase_confirmed: false,
+            phase_capability: None,
+            phase_read_failures: 0,
+            phase_submitted_at: None,
             use_custom_reprojection: core_ctx.platform().is_yvr(),
             core_context: core_ctx,
             xr_session,
@@ -525,6 +549,118 @@ impl StreamContext {
         }
     }
 
+    pub fn confirm_vrx_frame(&mut self) {
+        if let Some(video) = self.phase_video {
+            self.phase_submission += 1;
+            if self.phase_previous_video == Some(video) {
+                self.phase_duplicates[0] += 1;
+                self.phase_duplicates[1] += 1;
+            }
+            self.phase_previous_video = Some(video);
+            self.phase_confirmed = true;
+            self.phase_submitted_at = Some(Instant::now());
+        }
+    }
+
+    pub fn report_vrx_wait(&mut self) {
+        use alvr_packets::vrx_phase::{VRX_PHASE_VERSION, VrxEyeRecord, VrxPhaseMessage};
+        let Some((session, token)) = self.core_context.vrx_phase_offer() else {
+            return;
+        };
+        if crate::fault_check("vrx_phase_feedback_loss", "control_socket").is_err() {
+            return;
+        }
+        if self.phase_session != Some(session) {
+            self.phase_counter = crate::vrx_counter::VrxCounter::open();
+            self.phase_capability = None;
+            self.phase_read_failures = 0;
+            self.phase_session = Some(session);
+            self.phase_sequence = 0;
+            self.phase_duplicates = [0; 2];
+        }
+        let read_started = Instant::now();
+        let count = self
+            .phase_counter
+            .as_mut()
+            .and_then(|counter| counter.read());
+        let read_us = read_started.elapsed().as_micros();
+        if count.is_none() {
+            self.phase_read_failures = self.phase_read_failures.saturating_add(1);
+            if self.phase_read_failures == 3 {
+                self.phase_counter = None;
+                StageFailure::new(
+                    "vrx_vsync_probe",
+                    "counter_unavailable",
+                    false,
+                    "nominal_frame_pacing",
+                    "instance,session,swapchains,decoder",
+                    "Official provider counter unavailable; retry on stream recreation",
+                )
+                .log(self.core_context.platform());
+            }
+        } else {
+            self.phase_read_failures = 0;
+        }
+        let provider = count.is_some_and(|value| value != 0);
+        if self.phase_capability != Some((token, provider)) {
+            self.core_context
+                .send_vrx_phase(VrxPhaseMessage::Capability {
+                    version: VRX_PHASE_VERSION,
+                    session,
+                    token,
+                    provider,
+                });
+            self.phase_capability = Some((token, provider));
+        }
+        if self.phase_confirmed
+            && let Some(vsync) = count
+        {
+            self.phase_sequence += 1;
+            let video_timestamp_ns = self
+                .phase_previous_video
+                .map_or(0, |time| time.as_nanos() as u64);
+            let submit_to_wait_ns = self
+                .phase_submitted_at
+                .map_or(0, |time| time.elapsed().as_nanos() as u64);
+            let eye_records = [0, 1].map(|eye| VrxEyeRecord {
+                eye,
+                video_timestamp_ns,
+                submission: self.phase_submission,
+                submit_to_wait_ns,
+            });
+            self.core_context.send_vrx_phase(VrxPhaseMessage::Feedback {
+                version: VRX_PHASE_VERSION,
+                session,
+                token,
+                sequence: self.phase_sequence,
+                vsync,
+                duplicates: self.phase_duplicates,
+                history: alvr_packets::vrx_phase::History {
+                    atw: eye_records.to_vec(),
+                    submits: [0, 1].map(|_| {
+                        vec![alvr_packets::vrx_phase::SubmitRecord {
+                            submission: self.phase_submission,
+                            video_timestamp_ns,
+                            submit_ns: self.phase_submitted_at.map_or(0, |t| {
+                                t.duration_since(self.phase_epoch).as_nanos() as u64
+                            }),
+                        }]
+                    }),
+                    dropped: 0,
+                },
+            });
+            if self.phase_sequence % 90 == 1 {
+                alvr_common::info!(
+                    "event=vrx_lenovo_feedback source=openxr_submission seq={} vc={vsync} dcl={} dcr={} video_timestamp_ns={video_timestamp_ns} read_us={read_us}",
+                    self.phase_sequence,
+                    self.phase_duplicates[0],
+                    self.phase_duplicates[1]
+                );
+            }
+        }
+        self.phase_confirmed = false;
+    }
+
     pub fn update_real_time_config(&mut self, config: &RealTimeConfig) {
         self.config.passthrough = config.passthrough.clone();
         self.config.clientside_post_processing = config.clientside_post_processing.clone();
@@ -550,6 +686,7 @@ impl StreamContext {
 
         let (timestamp, frame_metadata, buffer_ptr) =
             if let Some((timestamp, buffer_ptr)) = frame_result {
+                self.phase_video = Some(timestamp);
                 if let Some(metadata) = self.core_context.report_compositor_start(timestamp) {
                     self.last_good_video_frame_metadata = VideoFrameMetadata {
                         foveation_center_shifts: metadata
