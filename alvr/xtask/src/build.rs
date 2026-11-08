@@ -43,7 +43,7 @@ fn sync_vrx_model_poses(resources: &std::path::Path) {
             .join("rendermodels")
             .join(&name)
             .join(format!("{name}.json"));
-        // Lenovo meshes remain an optional, private local asset bundle.
+        // A model can be absent from custom builds that omit VRX resources.
         if !path.exists() {
             continue;
         }
@@ -430,8 +430,7 @@ pub fn build_streamer(
         )
         .unwrap();
 
-        // Private-use controller assets are intentionally untracked. When the
-        // local asset directory exists, include it in the standalone streamer.
+        // Keep compatibility with existing local controller asset bundles.
         let private_vrx_resources = afs::workspace_dir().join("private/vrx-controller/resources");
         if private_vrx_resources.is_dir() {
             // SteamVR resolves {alvr_server} against the driver-root resources.
@@ -443,8 +442,8 @@ pub fn build_streamer(
             );
         }
 
-        // Input profiles belong to ALVR, not the private Lenovo model bundle.
-        // Copy last so an older local bundle cannot replace the native mappings.
+        // Copy the public VRX model and ALVR input profiles last so an older
+        // local bundle cannot replace the current assets or native mappings.
         let vrx_input_resources = afs::crate_dir("xtask").join("resources/vrx");
         copy_dir_contents(&vrx_input_resources, &build_layout.resources_dir());
         copy_dir_contents(
